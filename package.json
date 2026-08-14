@@ -1,7 +1,7 @@
 {
   "name": "dsh-tool-obsidian-vault",
   "version": "0.1.0",
-  "description": "Model-facing tools over a local Obsidian vault — a DSH plugin-development learning example",
+  "description": "DSH tool plugin for Obsidian vault operations",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
