@@ -3,13 +3,21 @@ import z from '@deepseek-ai/schemastery'
 /**
  * Resolved plugin configuration handed to `apply()`.
  *
- * `vaultRoot` is optional: when omitted, each tool call falls back to the
- * calling agent's session workspace (`exec.agent.session.header.cwd`), which
- * is exactly the directory the profile was launched from.
+ * Resolution order for the vault a tool call operates on:
+ *   1. the call's optional `vault` argument (vault name or path);
+ *   2. an explicit `vaultRoot` (single vault pinned in config);
+ *   3. the calling session's workspace (`exec.agent.session.header.cwd`)
+ *      when it is one of the discovered vaults;
+ *   4. the vault currently open in Obsidian (from the global registry);
+ *   5. the calling session's workspace, then `process.cwd()`.
  */
 export interface VaultConfig {
-  /** Absolute path to the vault root; default = the calling session's cwd. */
+  /** Absolute path to the vault root; default = discovery / session cwd. */
   vaultRoot?: string
+  /** Extra vault roots that are always searchable even if not in the Obsidian registry. */
+  vaultRoots?: string[]
+  /** Read the Obsidian global registry (`obsidian.json`) to discover every vault. */
+  discoverVaults: boolean
   /** Maximum hits returned by `vault_search`. */
   maxResults: number
   /** Directory names skipped during vault walking (plus every dot-directory). */
@@ -21,6 +29,8 @@ export const Config = z.object({
   // In schemastery an object property is optional unless `.required()` is
   // called, so a bare `z.string()` here already means "may be absent".
   vaultRoot: z.string(),
+  vaultRoots: z.array(z.string()),
+  discoverVaults: z.boolean().default(true),
   maxResults: z.number().min(1).default(20),
   ignoreDirs: z.array(z.string()).default(['.obsidian', '.git', '.claudian', '.trash']),
 })
