@@ -4,10 +4,10 @@
   "description": "Model-facing tools over a local Obsidian vault — a DSH plugin-development learning example",
   "type": "module",
   "main": "lib/index.js",
-  "types": "lib/types/index.d.ts",
+  "types": "lib/index.d.ts",
   "exports": {
     ".": {
-      "types": "./lib/types/index.d.ts",
+      "types": "./lib/index.d.ts",
       "default": "./lib/index.js"
     },
     "./package.json": "./package.json"
@@ -17,7 +17,9 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "clean": "rm -rf lib"
+    "clean": "rm -rf lib",
+    "prepublishOnly": "npm run clean && npm run build",
+    "test": "node scripts/smoke.mjs"
   },
   "license": "MIT",
   "dependencies": {
