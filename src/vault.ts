@@ -288,22 +288,32 @@ export function parseFrontmatter(content: string): ParsedFrontmatter {
 
   const block = lines.slice(1, fence)
   let lastKey: string | null = null
+  let lastIndent = -1
   for (const rawLine of block) {
     const line = rawLine.trimEnd()
-    if (line.trim() === '' || line.trim().startsWith('#')) continue
-    const listMatch = /^-\s+(.*)$/.exec(line.trim())
+    const trimmed = line.trim()
+    if (trimmed === '' || trimmed.startsWith('#')) continue
+    const indent = rawLine.length - rawLine.trimStart().length
+    const listMatch = /^-\s+(.*)$/.exec(trimmed)
     if (listMatch) {
       if (lastKey) {
         const field = result.fields.find((f) => f.key === lastKey)
         if (field) field.value = field.value ? `${field.value}, ${listMatch[1]}` : listMatch[1]
       } else {
-        result.issues.push(`列表项出现在键之前：${line.trim()}`)
+        result.issues.push(`列表项出现在键之前：${trimmed}`)
       }
       continue
     }
-    const kv = /^([^:#][^:]*):\s*(.*)$/.exec(line.trim())
+    const kv = /^([^:#][^:]*):\s*(.*)$/.exec(trimmed)
     if (!kv) {
-      result.issues.push(`无法解析的行（疑似嵌套或复杂 YAML）：${line.trim()}`)
+      result.issues.push(`无法解析的行（疑似嵌套或复杂 YAML）：${trimmed}`)
+      continue
+    }
+    // A key indented deeper than the previous key is a nested mapping (or an
+    // indented block), not a top-level property. Rather than silently flatten
+    // it into a top-level field, flag it so `valid` turns false.
+    if (lastKey && indent > lastIndent) {
+      result.issues.push(`疑似嵌套 YAML（未按顶层字段解析）：${trimmed}`)
       continue
     }
     const key = kv[1].trim()
@@ -314,6 +324,7 @@ export function parseFrontmatter(content: string): ParsedFrontmatter {
     }
     result.fields.push({ key, value })
     lastKey = key
+    lastIndent = indent
   }
   // A line-level parse problem makes the frontmatter not fully valid, even
   // though the fences themselves are well-formed.
@@ -359,8 +370,12 @@ export function extractLinks(body: string): OutLink[] {
     }
     const stem = (targetPart.trim().split('/').pop() ?? '').replace(/\.md$/, '')
     if (!stem) continue
-    if (seen.has(stem)) continue
-    seen.add(stem)
+    // Deduplicate by the resolved link identity (path + anchor + embed flag),
+    // NOT by `stem`: links whose basenames collide — e.g. `dir/a` vs `other/a`,
+    // or `a#x` vs `a#y` — are different links and must all be kept.
+    const identity = `${m[0].startsWith('!') ? '!' : ''}${targetPart.trim().replace(/\.md$/, '')}${anchor ? `#${anchor}` : ''}`
+    if (seen.has(identity)) continue
+    seen.add(identity)
     links.push({ target: inner, stem, anchor, alias, embedded: m[0].startsWith('!') })
   }
   return links

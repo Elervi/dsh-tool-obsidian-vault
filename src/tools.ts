@@ -236,10 +236,12 @@ export function registerTools(ctx: Context, config: VaultConfig): void {
 
   ctx.tools.register(defineTool({
     name: 'vault_read_note',
-    description: '读取 Obsidian vault 里一篇 Markdown 笔记的完整内容。',
+    description: '读取 Obsidian vault 里一篇 Markdown 笔记的内容，可按行切片（offset 从 1 起，limit 限制行数，适合大文件）。',
     parameters: {
       vault: { type: 'string', description: '可选：操作的目标 Obsidian 库（库名或绝对路径）；默认自动解析当前库。' },
       path: { type: 'string', required: true, description: '笔记的 vault 相对路径，/ 分隔，可省略 .md 后缀。' },
+      offset: { type: 'number', description: '可选：从第几行开始返回（1 起，默认 1）。' },
+      limit: { type: 'number', description: '可选：最多返回的行数；默认返回全文。' },
     },
     output: {
       schema: {
@@ -249,15 +251,21 @@ export function registerTools(ctx: Context, config: VaultConfig): void {
           path: { type: 'string', required: true },
           content: { type: 'string', required: true },
           bytes: { type: 'number' },
+          totalLines: { type: 'number' },
+          from: { type: 'number' },
+          to: { type: 'number' },
+          truncated: { type: 'boolean' },
         },
       },
       render: (_args, value) => {
-        const v = value as { path: string; content: string }
-        return [{ type: 'text', text: `<note path="${v.path}">\n${v.content}\n</note>` }]
+        const v = value as { path: string; content: string; totalLines?: number; from?: number; to?: number; truncated?: boolean }
+        const note = v.truncated ? `第 ${v.from}–${v.to} 行 / 共 ${v.totalLines} 行（已截断）` : undefined
+        const prefix = note ? `<!-- ${note} -->\n` : ''
+        return [{ type: 'text', text: `${prefix}<note path="${v.path}">\n${v.content}\n</note>` }]
       },
     },
     async execute(args, exec) {
-      const a = args as { path: string }
+      const a = args as { path: string; offset?: number; limit?: number }
       const root = await resolveVaultRoot(config, exec as CwdExec, (args as { vault?: string }).vault)
       const rel = noteRelPath(a.path)
       const target = await fs.resolve(joinRel(root, rel), { cwd: root })
@@ -266,7 +274,24 @@ export function registerTools(ctx: Context, config: VaultConfig): void {
       if (info.type !== 'file') throw new Error(`路径不是文件：${rel}`)
       try {
         const content = await fs.readText(target, exec.signal)
-        const result: { path: string; content: string; bytes?: number } = { path: rel, content }
+        const lines = content.split('\n')
+        const totalLines = lines.length
+        const offset = Math.max(1, Math.floor(a.offset ?? 1))
+        const start = offset - 1
+        const limit = a.limit && a.limit > 0 ? Math.floor(a.limit) : undefined
+        const end = limit !== undefined ? Math.min(totalLines, start + limit) : totalLines
+        const sliced = lines.slice(start, end).join('\n')
+        const result: {
+          path: string; content: string; bytes?: number;
+          totalLines: number; from: number; to: number; truncated: boolean;
+        } = {
+          path: rel,
+          content: sliced,
+          totalLines,
+          from: offset,
+          to: end,
+          truncated: end < totalLines,
+        }
         if (info.size !== undefined) result.bytes = info.size
         return result
       } catch (err) {

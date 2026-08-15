@@ -95,7 +95,7 @@ npm run build        # tsc -p tsconfig.json → lib/
 ### 5. 验证
 
 ```sh
-npm test             # 冒烟测试：对真实 vault 跑 list/search/backlinks，对临时目录跑 create/rename
+SMOKE_VAULT=/path/to/your/vault npm test   # 对真实 vault 跑 list/search/backlinks；不设置 SMOKE_VAULT 时跳过只读测试，写测试使用系统临时目录
 ```
 
 ### 常见问题
