@@ -1,6 +1,7 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
 import type { FileSystem, FsInfo, FsTarget, FsVersion } from '@deepseek-ai/dsh-fs'
+import path from 'node:path'
 import type { VaultConfig } from './config.js'
 import {
   walkNotes, searchNotes, findBacklinks, extractLinks, extractMarkdownLinks,
@@ -82,6 +83,46 @@ async function resolveVaultRoot(
   if (openVault) return norm(openVault.path)
   if (typeof cwd === 'string' && cwd.length > 0) return norm(cwd)
   return norm(process.cwd())
+}
+
+/** 当前自动解析的库及其判定依据（vault_current 工具的返回）。 */
+interface CurrentVaultInfo {
+  name: string
+  path: string
+  source: string
+}
+
+/**
+ * 与 {@link resolveVaultRoot} 相同的解析顺序，但额外返回"判定依据"，
+ * 让模型/用户一眼看清当前库是怎么选出来的（dsh-dock 焦点标记 →
+ * 最近活跃打开库 → 会话工作目录 → process.cwd()）。
+ */
+async function resolveCurrentVault(config: VaultConfig, exec: CwdExec): Promise<CurrentVaultInfo> {
+  const discovered = config.discoverVaults ? await discoverVaults() : []
+  const norm = (p: string) => p.replace(/\/+$/, '')
+  const cwd = exec.agent?.session?.header?.cwd
+  if (config.vaultRoot && config.vaultRoot.length > 0) {
+    const p = norm(config.vaultRoot)
+    return { name: path.basename(p), path: p, source: '配置 vaultRoot 固定指定' }
+  }
+  if (typeof cwd === 'string' && cwd.length > 0) {
+    const hit = discovered.find((v) => norm(v.path) === norm(cwd))
+    if (hit) return { name: hit.name, path: norm(hit.path), source: '会话工作目录恰好是库' }
+  }
+  const cur = selectCurrentVault(discovered)
+  if (cur) {
+    return {
+      name: cur.name,
+      path: cur.path,
+      source: cur.current ? 'dsh-dock 焦点标记（Obsidian 当前聚焦窗口）' : '最近活跃的已打开库',
+    }
+  }
+  const fallback = typeof cwd === 'string' && cwd.length > 0 ? cwd : process.cwd()
+  return {
+    name: path.basename(norm(fallback)) || '(未知)',
+    path: norm(fallback),
+    source: '回退：会话工作目录 / process.cwd()（未发现库）',
+  }
 }
 
 /**
@@ -208,6 +249,34 @@ export function registerTools(ctx: Context, config: VaultConfig): void {
       }
     },
     presentCall: () => ({ card: 'generic', title: '列出本机全部 Obsidian 库' }),
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'vault_current',
+    description: '返回当前自动解析的 Obsidian 库：不带 vault 参数时，vault 工具默认操作哪个库，含库名、路径与判定依据（dsh-dock 焦点标记 / 最近活跃打开库 / 会话工作目录 / cwd）。',
+    parameters: {},
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          name: { type: 'string', required: true },
+          path: { type: 'string', required: true },
+          source: { type: 'string', required: true },
+        },
+      },
+      render: (_args, value) => {
+        const v = value as { name: string; path: string; source: string }
+        return [{
+          type: 'text',
+          text: `当前 vault：${v.name}\n  ${v.path}\n判定依据：${v.source}`,
+        }]
+      },
+    },
+    async execute(_args, exec) {
+      return resolveCurrentVault(config, exec as CwdExec)
+    },
+    presentCall: () => ({ card: 'generic', title: '查询当前自动解析的库' }),
   }))
 
   ctx.tools.register(defineTool({

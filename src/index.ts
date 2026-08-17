@@ -3,7 +3,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import { Config } from './config.js'
 import type { VaultConfig } from './config.js'
-import { PROMPT_SECTION } from './prompt.js'
+import { buildPromptSection } from './prompt.js'
 import { registerTools } from './tools.js'
 
 /**
@@ -22,11 +22,12 @@ export const name = 'tool-obsidian-vault'
 export const inject = ['tools', 'fs', 'systemPrompt'] as const
 export { Config }
 
-export function apply(ctx: Context, config: VaultConfig): void {
+export async function apply(ctx: Context, config: VaultConfig): Promise<void> {
+  const text = await buildPromptSection()
   ctx.systemPrompt.section({
     name: 'tools:obsidian-vault',
     order: 110,
-    text: PROMPT_SECTION,
+    text,
   })
   registerTools(ctx, config)
 }

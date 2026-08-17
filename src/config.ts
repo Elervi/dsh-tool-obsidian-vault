@@ -8,7 +8,9 @@ import z from '@deepseek-ai/schemastery'
  *   2. an explicit `vaultRoot` (single vault pinned in config);
  *   3. the calling session's workspace (`exec.agent.session.header.cwd`)
  *      when it is one of the discovered vaults;
- *   4. the vault currently open in Obsidian (from the global registry);
+ *   4. the vault dsh-dock marked as the focused Obsidian window
+ *      (`~/.dsh/current-vault.json`), falling back to the most recently
+ *      active open vault from the global registry;
  *   5. the calling session's workspace, then `process.cwd()`.
  */
 export interface VaultConfig {

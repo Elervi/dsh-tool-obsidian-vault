@@ -39,6 +39,12 @@ export interface DiscoveredVault {
   /** Whether this vault is the one currently open in Obsidian. */
   open?: boolean
   /**
+   * Whether dsh-dock (running inside Obsidian) marked this vault as the
+   * window currently holding focus — the authoritative "current vault"
+   * signal, see {@link readCurrentVaultMarker}.
+   */
+  current?: boolean
+  /**
    * Epoch-ms mtime of `<vault>/.obsidian/workspace.json` — the last time that
    * vault window saved its workspace layout (`Workspace.requestSaveLayout`,
    * debounced on focus / layout change). Used to rank open vaults by how
@@ -58,6 +64,35 @@ export function obsidianConfigPath(): string | undefined {
     return appData ? path.join(appData, 'obsidian', 'obsidian.json') : undefined
   }
   return path.join(home, '.config', 'obsidian', 'obsidian.json')
+}
+
+/**
+ * Location of the "current vault" marker file written by the dsh-dock Obsidian
+ * plugin. Fixed at `<homedir>/.dsh/current-vault.json` regardless of DSH_HOME
+ * mode, so both sides always agree; absent when dsh-dock is not installed.
+ */
+export function currentVaultMarkerPath(): string {
+  return path.join(os.homedir(), '.dsh', 'current-vault.json')
+}
+
+/**
+ * Read the marker dsh-dock writes on window focus. It is the authoritative
+ * "which Obsidian window is the user looking at" signal, far fresher than any
+ * file mtime heuristic. Returns `null` on missing / malformed file — callers
+ * then fall back to workspace-activity ranking, so environments without
+ * dsh-dock behave exactly as before.
+ */
+export async function readCurrentVaultMarker(): Promise<{ name: string; path: string } | null> {
+  try {
+    const raw = await readFile(currentVaultMarkerPath(), 'utf8')
+    const data = JSON.parse(raw) as { name?: unknown; path?: unknown }
+    if (typeof data.name === 'string' && data.name && typeof data.path === 'string' && data.path) {
+      return { name: data.name, path: data.path }
+    }
+    return null
+  } catch {
+    return null
+  }
 }
 
 /**
@@ -94,6 +129,14 @@ export async function discoverVaults(): Promise<DiscoveredVault[]> {
         v.activeAt = undefined
       }
     }))
+    // dsh-dock 在窗口获得焦点时把当前 vault 写入标记文件；命中则标 current，
+    // 作为比 workspace.json mtime 更准的"当前 vault"信号（见 selectCurrentVault）。
+    const marker = await readCurrentVaultMarker()
+    if (marker) {
+      const norm = (p: string) => p.replace(/\/+$/, '')
+      const hit = vaults.find((v) => norm(v.path) === norm(marker.path) || v.name === marker.name)
+      if (hit) hit.current = true
+    }
     return vaults
   } catch {
     return []
@@ -102,12 +145,17 @@ export async function discoverVaults(): Promise<DiscoveredVault[]> {
 
 /**
  * Pick the vault a tool call without an explicit `vault` argument should
- * operate on: among currently open vaults, the one whose window was most
- * recently active (newest `.obsidian/workspace.json`), breaking ties by name.
- * Returns `undefined` when no vault is open, so callers fall through to the
+ * operate on:
+ * 1. the vault dsh-dock marked as the focused Obsidian window (`current`),
+ *    when one is marked (authoritative, see {@link readCurrentVaultMarker});
+ * 2. otherwise, among currently open vaults, the one whose window was most
+ *    recently active (newest `.obsidian/workspace.json`), ties broken by name.
+ * Returns `undefined` when no vault qualifies, so callers fall through to the
  * session workspace.
  */
 export function selectCurrentVault(vaults: readonly DiscoveredVault[]): DiscoveredVault | undefined {
+  const marked = vaults.find((v) => v.current)
+  if (marked) return marked
   return [...vaults]
     .filter((v) => v.open)
     .sort((a, b) => (b.activeAt ?? 0) - (a.activeAt ?? 0) || a.name.localeCompare(b.name))[0]
