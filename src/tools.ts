@@ -5,7 +5,7 @@ import type { VaultConfig } from './config.js'
 import {
   walkNotes, searchNotes, findBacklinks, extractLinks, extractMarkdownLinks,
   parseFrontmatter, rewriteWikilinks, rewriteMarkdownLinks, applyFrontmatterUpdate,
-  joinRel, createBodyCache, discoverVaults, buildLinkResolver, resolveLinkTarget,
+  joinRel, createBodyCache, discoverVaults, selectCurrentVault, buildLinkResolver, resolveLinkTarget,
   stemOf, dirOf, extractTags, findNotesByTag, listFolders, resolveMarkdownTarget,
   splitListValue,
 } from './vault.js'
@@ -41,8 +41,9 @@ interface CwdExec {
 /**
  * Resolve which vault root one call operates on. Order: the call's `vault`
  * argument (matched by name or path) → a pinned `config.vaultRoot` → the
- * session workspace when it is a discovered vault → the vault currently open
- * in Obsidian → the session workspace → `process.cwd()`.
+ * session workspace when it is a discovered vault → the most recently active
+ * open vault in Obsidian (see {@link selectCurrentVault}) → the session
+ * workspace → `process.cwd()`.
  */
 async function resolveVaultRoot(
   config: VaultConfig,
@@ -77,7 +78,7 @@ async function resolveVaultRoot(
     const hit = discovered.find((v) => norm(v.path) === norm(cwd))
     if (hit) return norm(hit.path)
   }
-  const openVault = discovered.find((v) => v.open)
+  const openVault = selectCurrentVault(discovered)
   if (openVault) return norm(openVault.path)
   if (typeof cwd === 'string' && cwd.length > 0) return norm(cwd)
   return norm(process.cwd())
@@ -160,7 +161,7 @@ export function registerTools(ctx: Context, config: VaultConfig): void {
 
   ctx.tools.register(defineTool({
     name: 'vault_list_vaults',
-    description: '列出本机所有已注册的 Obsidian 库（读 Obsidian 全局配置自动发现），返回库名、路径与当前打开状态。',
+    description: '列出本机所有已注册的 Obsidian 库（读 Obsidian 全局配置自动发现），返回库名、路径、打开状态与自动解析的当前库。',
     parameters: {},
     output: {
       schema: {
@@ -178,22 +179,32 @@ export function registerTools(ctx: Context, config: VaultConfig): void {
                 name: { type: 'string', required: true },
                 path: { type: 'string', required: true },
                 open: { type: 'boolean' },
+                current: { type: 'boolean' },
               },
             },
           },
         },
       },
       render: (_args, value) => {
-        const v = value as { total: number; vaults: Array<{ name: string; path: string; open?: boolean }> }
-        const lines = v.vaults.map((x) => `- ${x.name}  ${x.open ? '（当前打开）' : ''}\n    ${x.path}`)
+        const v = value as { total: number; vaults: Array<{ name: string; path: string; open?: boolean; current?: boolean }> }
+        const lines = v.vaults.map((x) => {
+          const tag = x.current ? '（当前打开 · 自动解析）' : x.open ? '（当前打开）' : ''
+          return `- ${x.name}  ${tag}\n    ${x.path}`
+        })
         return [{ type: 'text', text: `发现 ${v.total} 个 Obsidian 库：\n${lines.length ? lines.join('\n') : '(未发现，将回退到会话工作目录)'}` }]
       },
     },
     async execute() {
       const vaults = await discoverVaults()
+      const current = selectCurrentVault(vaults)
       return {
         total: vaults.length,
-        vaults: vaults.map((v) => (v.open ? { name: v.name, path: v.path, open: true } : { name: v.name, path: v.path })),
+        vaults: vaults.map((v) => ({
+          name: v.name,
+          path: v.path,
+          ...(v.open ? { open: true } : {}),
+          ...(current && current.path === v.path ? { current: true } : {}),
+        })),
       }
     },
     presentCall: () => ({ card: 'generic', title: '列出本机全部 Obsidian 库' }),

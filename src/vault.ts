@@ -1,5 +1,5 @@
 import type { FileSystem, FsTarget } from '@deepseek-ai/dsh-fs'
-import { readFile } from 'node:fs/promises'
+import { readFile, stat } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
@@ -38,6 +38,13 @@ export interface DiscoveredVault {
   path: string
   /** Whether this vault is the one currently open in Obsidian. */
   open?: boolean
+  /**
+   * Epoch-ms mtime of `<vault>/.obsidian/workspace.json` — the last time that
+   * vault window saved its workspace layout (`Workspace.requestSaveLayout`,
+   * debounced on focus / layout change). Used to rank open vaults by how
+   * recently their window was active. Absent when the file does not exist.
+   */
+  activeAt?: number
 }
 
 /** Platform-specific location of Obsidian's global vault registry. */
@@ -70,15 +77,40 @@ export async function discoverVaults(): Promise<DiscoveredVault[]> {
   }
   try {
     const data = JSON.parse(raw) as { vaults?: Record<string, { path?: string; open?: boolean }> }
-    const vaults = Object.values(data.vaults ?? {})
+    const vaults: DiscoveredVault[] = Object.values(data.vaults ?? {})
       .map((v) => ({ path: (v.path ?? '').trim(), open: Boolean(v.open) }))
       .filter((v) => v.path.length > 0)
       .map((v) => ({ name: path.basename(v.path), path: v.path, open: v.open }))
     vaults.sort((a, b) => a.name.localeCompare(b.name))
+    // Rank by last activity: the mtime of the vault's saved workspace layout
+    // mirrors how recently that window was focused (Obsidian writes it on
+    // focus / layout change). Failures (missing file, unwritable dir) leave
+    // `activeAt` unset instead of aborting discovery.
+    await Promise.all(vaults.map(async (v) => {
+      try {
+        const ws = await stat(path.join(v.path, '.obsidian', 'workspace.json'))
+        v.activeAt = ws.mtimeMs
+      } catch {
+        v.activeAt = undefined
+      }
+    }))
     return vaults
   } catch {
     return []
   }
+}
+
+/**
+ * Pick the vault a tool call without an explicit `vault` argument should
+ * operate on: among currently open vaults, the one whose window was most
+ * recently active (newest `.obsidian/workspace.json`), breaking ties by name.
+ * Returns `undefined` when no vault is open, so callers fall through to the
+ * session workspace.
+ */
+export function selectCurrentVault(vaults: readonly DiscoveredVault[]): DiscoveredVault | undefined {
+  return [...vaults]
+    .filter((v) => v.open)
+    .sort((a, b) => (b.activeAt ?? 0) - (a.activeAt ?? 0) || a.name.localeCompare(b.name))[0]
 }
 
 /** Skip dot-directories and any name the user listed in `ignoreDirs`. */
