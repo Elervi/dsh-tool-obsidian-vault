@@ -19,7 +19,8 @@
     "build": "tsc -p tsconfig.json",
     "clean": "rm -rf lib",
     "prepublishOnly": "npm run clean && npm run build",
-    "test": "node scripts/smoke.mjs"
+    "test": "node scripts/smoke.mjs",
+    "test:fixes": "node scripts/verify-fixes.mjs"
   },
   "license": "MIT",
   "dependencies": {

@@ -3,7 +3,7 @@
 面向本地 Obsidian vault 的 DSH 工具插件 —— 一个「插件开发方法」学习示例。
 
 它导出标准 Cordis 插件形（`name` / `inject` / `Config` / `apply`），通过
-`ctx.tools.register()` 注册 15 个模型可调用的工具，并注册一条 `tools:obsidian-vault`
+`ctx.tools.register()` 注册 16 个模型可调用的工具，并注册一条 `tools:obsidian-vault`
 提示段。所有 vault I/O 都走 `ctx.fs`（继承沙箱、原子写、版本守卫），扫描逻辑
 放在 `src/vault.ts`，工具定义放在 `src/tools.ts`。
 
@@ -44,16 +44,20 @@ Windows `%APPDATA%\obsidian\`）自动发现本机全部 vault。每个工具都
 | `vault_frontmatter` | 读 frontmatter 并校验 | YAML 子集解析、问题报告 |
 | `vault_update_frontmatter` | 增删改 Properties（无 frontmatter 时自动创建） | 行级 YAML 块改写、保留字段顺序、Obsidian Properties |
 | `vault_note_links` | 列笔记的全部出链 | 链接解析（锚点/别名/嵌入） |
-| `vault_rename_note` | 重命名/移动并更新全库引用（wikilink + markdown 链接，`keep_old: 'stub'` 留跳转占位） | 多文件写、版本守卫、写前预检、自引用改写、相对路径重算 |
+| `vault_rename_note` | 重命名/移动并更新全库引用（wikilink + markdown 链接 + frontmatter aliases，`keep_old: 'stub'` 留跳转占位） | 多文件写、版本守卫、写前预检、失败逆序回滚、自引用改写、相对路径重算 |
 
 ### 文件操作要点
 
 - **小改优先 `vault_edit_note`**：字面替换、默认恰好一次匹配（多次须 `replace_all: true`），带版本守卫——对应
   [Obsidian 官方推荐的 `Vault.process()`](https://github.com/obsidianmd/obsidian-developer-docs/blob/31946e5a/en/Plugins/Vault.md) 的「读-改-写不被并发打断」。
 - **元数据用 `vault_update_frontmatter`**：`set`/`delete` 增删改 Properties，没有 frontmatter 时自动创建，保留其余字段顺序与正文。
+- **重命名是"引用先改、新文件后建"**：改写引用阶段任何失败（如并发修改导致版本失配）都会**逆序回滚**已写文件并报"未留下任何修改"；新文件 `createIfAbsent` 失败同样回滚引用。只有可选的 `keep_old: 'stub'` 失败时操作本身已完成，仅旧文件未变。
+- **`[[别名]]` 参与链接解析**：frontmatter `aliases` 会被 `vault_backlinks` 与 `vault_rename_note` 识别（对应 Obsidian 的别名解析），改名时指向旧笔记的别名链接也会被改写。
+- **markdown 链接支持尖括号带空格路径**：`[text](<my note.md>)` 在反链、改名、出链统计中都被正确处理。
 - **删除的限制**：`ctx.fs` 服务没有删除/回收站原语（对应 Obsidian 的 `vault.trash()`/`vault.delete()` 在 DSH 侧由 bash 承担），
   所以重命名后旧文件默认保留（可用 `keep_old: 'stub'` 替换为跳转占位），彻底删除请用 bash 清理。
 - **搜索语法**：默认字面子串（大小写不敏感）；`regex: true` 用正则；`match_all: true` 空格分词、每词必中（AND）。
+  搜索命中 `limit` 条后提前停止读取，命中稀疏时不会读完全库正文。
 - **标签**：识别正文内联 `#tag`（`#tag/子标签`）与 frontmatter `tags`/`tag` 属性，`vault_search_tags` 按 Obsidian `#tag` 语义匹配。
 
 ## 从 git 安装

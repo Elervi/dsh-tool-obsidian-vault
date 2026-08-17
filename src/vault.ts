@@ -95,13 +95,33 @@ export async function readCurrentVaultMarker(): Promise<{ name: string; path: st
   }
 }
 
+/** TTL for the vault-discovery cache: short enough for focus ranking, long enough to avoid re-reading the registry on every call. */
+const DISCOVER_TTL_MS = 5_000
+
+let discoverCache: { at: number; promise: Promise<DiscoveredVault[]> } | undefined
+
 /**
  * Discover every Obsidian vault registered in the global config
  * (`obsidian.json`), which the desktop app writes on launch. Missing or
  * unreadable registry yields an empty list — callers then fall back to the
- * session workspace, so discovery failures are never fatal.
+ * session workspace, so discovery failures are never fatal. Results are
+ * cached for {@link DISCOVER_TTL_MS} (a failed discovery is not cached);
+ * focus-marker and workspace-activity changes propagate within the TTL.
  */
-export async function discoverVaults(): Promise<DiscoveredVault[]> {
+export function discoverVaults(): Promise<DiscoveredVault[]> {
+  const now = Date.now()
+  const hit = discoverCache
+  if (hit && now - hit.at < DISCOVER_TTL_MS) return hit.promise
+  const promise = discoverVaultsUncached()
+  discoverCache = { at: now, promise }
+  promise.catch(() => {
+    // A failed discovery is not worth caching: the next call retries.
+    if (discoverCache?.promise === promise) discoverCache = undefined
+  })
+  return promise
+}
+
+async function discoverVaultsUncached(): Promise<DiscoveredVault[]> {
   const configPath = obsidianConfigPath()
   if (!configPath) return []
   let raw: string
@@ -176,7 +196,10 @@ export function joinRel(dir: string, name: string): string {
  * (or every file when `includeAll` is set, mirroring Obsidian's
  * `vault.getFiles()` vs `vault.getMarkdownFiles()`). Uses `ctx.fs.listDir`,
  * so it inherits the mounted backend (sandbox, symlink resolution, stable
- * ordering) instead of reaching for `node:fs`.
+ * ordering) instead of reaching for `node:fs`. Directory listing is
+ * breadth-first with bounded concurrency per level (a barrier keeps the
+ * traversal correct without worker-queue races); results are sorted
+ * deterministically before returning.
  */
 export async function walkNotes(
   fs: FileSystem,
@@ -185,36 +208,44 @@ export async function walkNotes(
   signal?: AbortSignal,
   containRoot = false,
   includeAll = false,
+  concurrency = 8,
 ): Promise<VaultNote[]> {
   const notes: VaultNote[] = []
-  const stack: Array<{ dir: FsTarget; rel: string }> = [{ dir: root, rel: '' }]
-  while (stack.length > 0) {
-    const { dir, rel } = stack.pop()!
-    const entries = await fs.listDir(dir, signal)
-    for (const entry of entries) {
-      // A symlinked entry can resolve outside the vault; `fs.contains` compares
-      // canonical identities, so a resolved target outside the root is skipped
-      // rather than read as vault content.
-      if (containRoot && !fs.contains(root, entry.target)) continue
-      if (entry.type === 'directory') {
-        if (!isIgnoredDir(entry.name, ignoreDirs)) {
-          stack.push({ dir: entry.target, rel: joinRel(rel, entry.name) })
-        }
-      } else if (entry.type === 'file') {
-        if (includeAll) {
-          const dot = entry.name.lastIndexOf('.')
-          notes.push({
-            path: joinRel(rel, entry.name),
-            target: entry.target,
-            size: entry.size,
-            version: entry.version,
-            extension: entry.name.endsWith('.md') ? 'md' : dot > 0 ? entry.name.slice(dot + 1).toLowerCase() : '',
-          })
-        } else if (entry.name.endsWith('.md')) {
-          notes.push({ path: joinRel(rel, entry.name), target: entry.target, size: entry.size, version: entry.version, extension: 'md' })
+  // Breadth-first by level: every directory of the current level is listed in
+  // parallel, children are collected into the next level, then the barrier
+  // advances. A worker-pool over a shared queue would drop directories when
+  // idle workers exit before later levels are enqueued.
+  let level: Array<{ dir: FsTarget; rel: string }> = [{ dir: root, rel: '' }]
+  while (level.length > 0) {
+    const nextLevel: Array<{ dir: FsTarget; rel: string }> = []
+    await mapLimit(level, concurrency, async ({ dir, rel }) => {
+      const entries = await fs.listDir(dir, signal)
+      for (const entry of entries) {
+        // A symlinked entry can resolve outside the vault; `fs.contains` compares
+        // canonical identities, so a resolved target outside the root is skipped
+        // rather than read as vault content.
+        if (containRoot && !fs.contains(root, entry.target)) continue
+        if (entry.type === 'directory') {
+          if (!isIgnoredDir(entry.name, ignoreDirs)) {
+            nextLevel.push({ dir: entry.target, rel: joinRel(rel, entry.name) })
+          }
+        } else if (entry.type === 'file') {
+          if (includeAll) {
+            const dot = entry.name.lastIndexOf('.')
+            notes.push({
+              path: joinRel(rel, entry.name),
+              target: entry.target,
+              size: entry.size,
+              version: entry.version,
+              extension: entry.name.endsWith('.md') ? 'md' : dot > 0 ? entry.name.slice(dot + 1).toLowerCase() : '',
+            })
+          } else if (entry.name.endsWith('.md')) {
+            notes.push({ path: joinRel(rel, entry.name), target: entry.target, size: entry.size, version: entry.version, extension: 'md' })
+          }
         }
       }
-    }
+    })
+    level = nextLevel
   }
   notes.sort((a, b) => a.path.localeCompare(b.path))
   return notes
@@ -305,7 +336,9 @@ export interface SearchOptions {
 /**
  * Case-insensitive keyword search across note file names and bodies.
  * Reads run with bounded concurrency and reuse `cache` (validated by version)
- * to skip unchanged files on repeat queries.
+ * to skip unchanged files on repeat queries. Matching happens inside the read
+ * workers and stops early once `limit` hits are found, so a sparse hit set
+ * does not force a full-vault body read.
  */
 export async function searchNotes(
   fs: FileSystem,
@@ -330,13 +363,11 @@ export async function searchNotes(
     }
   }
   const tokens = !regex && matchAll ? q.split(/\s+/).filter((t) => t.length > 0) : undefined
-  const bodies = await mapLimit(notes, concurrency, async (note) => {
+  const found: Array<{ index: number; hit: NoteHit }> = []
+  let filled = false
+  await mapLimit(notes, concurrency, async (note, index) => {
+    if (filled) return
     const body = await readBodyCached(fs, note, cache, signal)
-    return { note, body }
-  })
-  const hits: NoteHit[] = []
-  for (const { note, body } of bodies) {
-    if (hits.length >= limit) break
     const text = body?.text ?? ''
     const haystack = caseSensitive ? `${note.path}\n${text}` : `${note.path}\n${text}`.toLowerCase()
     let nameMatch = false
@@ -370,17 +401,34 @@ export async function searchNotes(
       bodyIndex = (caseSensitive ? text : text.toLowerCase()).indexOf(needle)
       matchLen = q.length
     }
-    if (nameMatch || bodyIndex >= 0) {
+    if ((nameMatch || bodyIndex >= 0) && found.length < limit) {
       const snippet = bodyIndex >= 0 ? excerptAround(text, bodyIndex, Math.max(matchLen, 1)) : '文件名命中（正文无匹配）'
-      hits.push({ path: note.path, snippet })
+      found.push({ index, hit: { path: note.path, snippet } })
+      if (found.length >= limit) filled = true
     }
-  }
-  return hits
+  })
+  found.sort((a, b) => a.index - b.index)
+  return found.map((f) => f.hit)
 }
 
 /** Basename stem of a vault-relative note path (no directories, no `.md`). */
 export function stemOf(relPath: string): string {
   return (relPath.replace(/\.md$/, '').split('/').pop() ?? '') || relPath
+}
+
+/**
+ * One markdown link `[text](target)` — both the plain form and Obsidian's
+ * angle-bracket form `[text](<path with spaces>)`. The two alternatives let
+ * the bracket form carry spaces (and even `)`) while the plain form keeps the
+ * historical no-space, no-`)` restriction; image embeds `![…](…)` are
+ * excluded via the negative lookbehind. Groups: 1 = link text, 2 = angle-bracket
+ * target (when present), 3 = plain target (when present).
+ */
+const MARKDOWN_LINK_RE = /(?<!!)\[([^\]]*)\]\((?:<([^>]*)>|([^)\s]+))\)/g
+
+/** Extract the raw target of a matched markdown link (groups 2 or 3). */
+function markdownLinkTarget(m: RegExpExecArray): string {
+  return (m[2] ?? m[3]).trim()
 }
 
 /** One `[[wikilink]]` body (without brackets) split into its parts. */
@@ -433,12 +481,20 @@ export function parseLinkBody(inner: string, embedded: boolean): ParsedLink {
  * Index over every known note path for resolving links the way Obsidian does:
  * a path-qualified link matches one exact vault-relative path; a bare-stem
  * link matches the shortest unique path (ties break lexicographically).
+ * Frontmatter aliases populate `byAlias` lazily via {@link indexAliases}
+ * (bodies are not read here — callers with bodies in hand add them).
  */
 export interface LinkResolver {
   /** Lowercased stem → candidate rel paths, sorted shortest-first. */
   byStem: Map<string, string[]>
   /** Lowercased rel path (no `.md`) → original rel path. */
   byPath: Map<string, string>
+  /**
+   * Lowercased frontmatter alias → rel path (no `.md`). Obsidian resolves
+   * `[[alias]]` before the same-named file, so {@link resolveLinkTarget}
+   * consults this before the byStem fallback.
+   */
+  byAlias: Map<string, string>
 }
 
 /** Build a link resolver from the notes of one vault walk. */
@@ -456,19 +512,51 @@ export function buildLinkResolver(notes: readonly VaultNote[]): LinkResolver {
   for (const list of byStem.values()) {
     list.sort((a, b) => a.length - b.length || a.localeCompare(b))
   }
-  return { byStem, byPath }
+  return { byStem, byPath, byAlias: new Map() }
+}
+
+/**
+ * Index frontmatter `aliases` from note bodies into `resolver.byAlias`, so
+ * links written as `[[alias]]` resolve like Obsidian's alias handling. Bodies
+ * are consumed only when already in hand (rename pre-scan, backlink scan) —
+ * this never triggers reads of its own. For a duplicate alias the winning
+ * note is the shortest path (ties lexicographic), matching the resolver's
+ * bare-stem disambiguation.
+ */
+export function indexAliases(resolver: LinkResolver, entries: Iterable<{ path: string; body: string }>): void {
+  const seen = new Set<string>()
+  for (const { path, body } of entries) {
+    const fm = parseFrontmatter(body)
+    if (!fm.present || fm.issues.length > 0) continue
+    const rel = path.replace(/\.md$/, '')
+    for (const field of fm.fields) {
+      if (field.key.toLowerCase() !== 'aliases') continue
+      for (const alias of splitListValue(field.value)) {
+        const key = alias.toLowerCase()
+        if (key === '' || seen.has(key)) continue
+        seen.add(key)
+        const existing = resolver.byAlias.get(key)
+        if (!existing || rel.length < existing.length || (rel.length === existing.length && rel.localeCompare(existing) < 0)) {
+          resolver.byAlias.set(key, rel)
+        }
+      }
+    }
+  }
 }
 
 /**
  * Resolve one link target part against known notes, or `undefined` when the
  * link points at no existing note. Matching is case-insensitive, mirroring
- * Obsidian's link resolution.
+ * Obsidian's link resolution; a bare target consults frontmatter aliases
+ * before file stems.
  */
 export function resolveLinkTarget(resolver: LinkResolver, pathPart: string, stem: string): string | undefined {
   const norm = pathPart.trim().replace(/\.md$/, '')
   if (norm.includes('/')) {
     return resolver.byPath.get(norm.toLowerCase())
   }
+  const alias = resolver.byAlias.get(norm.toLowerCase())
+  if (alias) return alias
   const candidates = resolver.byStem.get(stem.toLowerCase())
   if (!candidates || candidates.length === 0) return undefined
   // Obsidian resolves a bare link to the shortest unique path; sorted order
@@ -503,7 +591,12 @@ function isWikilinkHit(
   if (targetRel !== undefined) {
     return resolved !== undefined && resolved.toLowerCase() === targetRel.toLowerCase()
   }
-  return targetStem !== undefined && parsed.stem.toLowerCase() === targetStem.toLowerCase()
+  // Title mode: the bare stem matches, or the link resolved through an alias
+  // (or a path-qualified target) to a note whose stem matches the query title.
+  return targetStem !== undefined && (
+    parsed.stem.toLowerCase() === targetStem.toLowerCase()
+    || (resolved !== undefined && stemOf(resolved).toLowerCase() === targetStem.toLowerCase())
+  )
 }
 
 /**
@@ -528,6 +621,9 @@ export async function findBacklinks(
     note,
     body: await readBodyCached(fs, note, cache, signal),
   }))
+  // Index frontmatter aliases from the bodies we already read, so `[[alias]]`
+  // links resolve to the aliased note (and match backlink queries by title).
+  indexAliases(resolver, bodies.flatMap((b) => b.body ? [{ path: b.note.path, body: b.body.text }] : []))
   const checkWikilink = format === 'wikilink' || format === 'all'
   const checkMarkdown = format === 'markdown' || format === 'all'
   const hits: NoteHit[] = []
@@ -549,10 +645,9 @@ export async function findBacklinks(
       }
     }
     if (!hit && checkMarkdown) {
-      const mdRe = /(?<!!)\[([^\]]*)\]\(([^)\s]+)\)/g
       let m: RegExpExecArray | null
-      while ((m = mdRe.exec(text)) !== null) {
-        const resolved = resolveMarkdownTarget(m[2], noteDir, resolver)
+      while ((m = MARKDOWN_LINK_RE.exec(text)) !== null) {
+        const resolved = resolveMarkdownTarget(markdownLinkTarget(m), noteDir, resolver)
         if (!resolved) continue
         const isHit = targetRel !== undefined
           ? resolved.toLowerCase() === targetRel.toLowerCase()
@@ -704,7 +799,8 @@ export interface TagHit {
 /**
  * Find notes carrying a tag, matching Obsidian's `#tag` search semantics: the
  * query matches the exact tag or any nested subtag under it (`tag/sub`).
- * Scans inline tags and frontmatter `tags`/`tag` properties.
+ * Scans inline tags and frontmatter `tags`/`tag` properties. Matching happens
+ * inside the read workers and stops once `limit` hits are found.
  */
 export async function findNotesByTag(
   fs: FileSystem,
@@ -716,13 +812,11 @@ export async function findNotesByTag(
   concurrency = 8,
 ): Promise<TagHit[]> {
   const q = query.trim().toLowerCase()
-  const hits: TagHit[] = []
-  const bodies = await mapLimit(notes, concurrency, async (note) => ({
-    note,
-    body: await readBodyCached(fs, note, cache, signal),
-  }))
-  for (const { note, body } of bodies) {
-    if (hits.length >= limit) break
+  const found: Array<{ index: number; hit: TagHit }> = []
+  let filled = false
+  await mapLimit(notes, concurrency, async (note, index) => {
+    if (filled) return
+    const body = await readBodyCached(fs, note, cache, signal)
     const all = extractTags(body?.text ?? '')
     const matched = all
       .filter((t) => {
@@ -730,9 +824,13 @@ export async function findNotesByTag(
         return l === q || l.startsWith(q + '/')
       })
       .sort()
-    if (matched.length > 0) hits.push({ path: note.path, tags: matched })
-  }
-  return hits
+    if (matched.length > 0 && found.length < limit) {
+      found.push({ index, hit: { path: note.path, tags: matched } })
+      if (found.length >= limit) filled = true
+    }
+  })
+  found.sort((a, b) => a.index - b.index)
+  return found.map((f) => f.hit)
 }
 
 /**
@@ -753,25 +851,29 @@ export async function listFolders(
   ignoreDirs: readonly string[],
   signal?: AbortSignal,
   containRoot = false,
+  concurrency = 8,
 ): Promise<FolderStat[]> {
   const counts = new Map<string, number>()
   counts.set('', 0)
-  const stack: Array<{ dir: FsTarget; rel: string }> = [{ dir: root, rel: '' }]
-  while (stack.length > 0) {
-    const { dir, rel } = stack.pop()!
-    const entries = await fs.listDir(dir, signal)
-    for (const entry of entries) {
-      if (containRoot && !fs.contains(root, entry.target)) continue
-      if (entry.type === 'directory') {
-        if (!isIgnoredDir(entry.name, ignoreDirs)) {
-          const relDir = joinRel(rel, entry.name)
-          counts.set(relDir, 0)
-          stack.push({ dir: entry.target, rel: relDir })
+  let level: Array<{ dir: FsTarget; rel: string }> = [{ dir: root, rel: '' }]
+  while (level.length > 0) {
+    const nextLevel: Array<{ dir: FsTarget; rel: string }> = []
+    await mapLimit(level, concurrency, async ({ dir, rel }) => {
+      const entries = await fs.listDir(dir, signal)
+      for (const entry of entries) {
+        if (containRoot && !fs.contains(root, entry.target)) continue
+        if (entry.type === 'directory') {
+          if (!isIgnoredDir(entry.name, ignoreDirs)) {
+            const relDir = joinRel(rel, entry.name)
+            counts.set(relDir, 0)
+            nextLevel.push({ dir: entry.target, rel: relDir })
+          }
+        } else if (entry.type === 'file' && entry.name.endsWith('.md')) {
+          counts.set(rel, (counts.get(rel) ?? 0) + 1)
         }
-      } else if (entry.type === 'file' && entry.name.endsWith('.md')) {
-        counts.set(rel, (counts.get(rel) ?? 0) + 1)
       }
-    }
+    })
+    level = nextLevel
   }
   return [...counts.entries()]
     .map(([path, notes]) => ({ path, notes }))
@@ -884,10 +986,9 @@ export interface MarkdownLinkHit {
  */
 export function extractMarkdownLinks(body: string): MarkdownLinkHit[] {
   const links: MarkdownLinkHit[] = []
-  const re = /(?<!!)\[([^\]]*)\]\(([^)\s]+)\)/g
   let m: RegExpExecArray | null
-  while ((m = re.exec(body)) !== null) {
-    let target = m[2].trim()
+  while ((m = MARKDOWN_LINK_RE.exec(body)) !== null) {
+    let target = markdownLinkTarget(m)
     if (target.startsWith('<') && target.endsWith('>')) target = target.slice(1, -1)
     links.push({ target, text: m[1], index: m.index })
   }
@@ -959,19 +1060,20 @@ export function rewriteMarkdownLinks(
 ): MarkdownRewriteResult {
   const newRel = newRelPath.replace(/\.md$/, '')
   const oldKey = oldRelNoExt.toLowerCase()
-  const linkRe = /(?<!!)\[([^\]]*)\]\(([^)\s]+)\)/g
   let count = 0
-  const text = body.replace(linkRe, (whole, text: string, rawTarget: string) => {
+  const text = body.replace(MARKDOWN_LINK_RE, (whole, ...args) => {
+    const linkText = args[0] as string
+    // 正则的两个备选分支保证其一匹配；空串兜底仅用于满足类型收窄。
+    const rawTarget = (((args[1] as string | undefined) ?? (args[2] as string | undefined)) ?? '').trim()
     const resolved = resolveMarkdownTarget(rawTarget, noteDir, resolver)
     if (!resolved || resolved.toLowerCase() !== oldKey) return whole
     count++
-    const raw = rawTarget.trim()
-    const wasAngle = raw.startsWith('<') && raw.endsWith('>')
-    const hashIdx = raw.indexOf('#')
-    const anchor = hashIdx >= 0 ? raw.slice(hashIdx) : ''
+    const wasAngle = args[1] !== undefined
+    const hashIdx = rawTarget.indexOf('#')
+    const anchor = hashIdx >= 0 ? rawTarget.slice(hashIdx) : ''
     const newTarget = relativePath(noteDir, newRel)
     const rendered = wasAngle ? `<${newTarget}${anchor}>` : `${newTarget}${anchor}`
-    return `[${text}](${rendered})`
+    return `[${linkText}](${rendered})`
   })
   return { text, count }
 }

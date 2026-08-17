@@ -8,7 +8,7 @@ import {
   parseFrontmatter, rewriteWikilinks, rewriteMarkdownLinks, applyFrontmatterUpdate,
   joinRel, createBodyCache, discoverVaults, selectCurrentVault, buildLinkResolver, resolveLinkTarget,
   stemOf, dirOf, extractTags, findNotesByTag, listFolders, resolveMarkdownTarget,
-  splitListValue,
+  splitListValue, mapLimit, indexAliases,
 } from './vault.js'
 import type { VaultNote, BacklinkFormat } from './vault.js'
 
@@ -32,6 +32,37 @@ function emitObserved(ctx: Context, target: FsTarget, version: FsVersion, exec: 
   } catch {
     // Observation recording is best-effort; tool results must not depend on it.
   }
+}
+
+/**
+ * Reverse-rollback reference rewrites that already committed during a rename.
+ * Each file is written back to its pre-rename body under a fresh version guard
+ * (re-stat), so a concurrent edit after our write surfaces as a rollback
+ * failure instead of silently clobbering the other writer. Returns the paths
+ * that could not be rolled back — an empty list means a clean rollback with
+ * no residue.
+ */
+async function rollbackRewrites(
+  ctx: Context,
+  fs: FileSystem,
+  planned: ReadonlyArray<{ note: VaultNote; original: string }>,
+  committed: number,
+  exec: { signal?: AbortSignal },
+): Promise<string[]> {
+  const errors: string[] = []
+  for (let i = committed - 1; i >= 0; i--) {
+    const { note, original } = planned[i]!
+    try {
+      const info = await fs.stat(note.target, exec.signal)
+      if (info && info.type === 'file') {
+        const outcome = await fs.writeText(note.target, original, { kind: 'replaceIfVersion', version: info.version }, exec.signal)
+        emitObserved(ctx, note.target, outcome.version, exec)
+      }
+    } catch (err) {
+      errors.push(`${note.path}（${errorLabel(err)}）`)
+    }
+  }
+  return errors
 }
 
 /** Loose view of `ToolRunContext` for reading the calling session's cwd. */
@@ -617,6 +648,13 @@ export function registerTools(ctx: Context, config: VaultConfig): void {
         emitObserved(ctx, target, outcome.version, exec)
         return { path: rel, operation: outcome.operation }
       } catch (err) {
+        const e = err as { code?: string }
+        if (e?.code === 'FS_NOT_OBSERVED') {
+          throw new Error(`写入失败 ${rel}：文件在检查后被并发创建（createIfAbsent 拒绝覆盖）；如需覆盖请传 overwrite: true 重试`)
+        }
+        if (e?.code === 'FS_STALE_VERSION') {
+          throw new Error(`写入失败 ${rel}：文件在检查后被并发修改（版本不匹配）；请先 vault_read_note 重新读取，再重试`)
+        }
         throw new Error(`写入失败 ${rel}：${errorLabel(err)}`)
       }
     },
@@ -673,7 +711,9 @@ export function registerTools(ctx: Context, config: VaultConfig): void {
           exec.signal,
         )
         emitObserved(ctx, target, outcome.version, exec)
-        const matches = outcome.before.split(a.old_string).length - 1
+        // before/after 是后端 LF 归一化后的 diff basis；old_string 里的 CRLF
+        // 也按同一规则归一化再计数，避免 CRLF 文件上匹配数被算成 0。
+        const matches = outcome.before.split(a.old_string.replaceAll('\r\n', '\n')).length - 1
         return { path: rel, before: outcome.before, after: outcome.after, matches }
       } catch (err) {
         const e = err as { code?: string }
@@ -684,7 +724,10 @@ export function registerTools(ctx: Context, config: VaultConfig): void {
           throw new Error(`在 ${rel} 中未找到与 old_string 精确匹配的文本；编辑按字面匹配，请先 vault_read_note 核对原文（注意换行与首尾空白）`)
         }
         if (e?.code === 'FS_STALE_VERSION') {
-          throw new Error(`编辑 ${rel} 失败：文件被并发修改（版本不匹配），请重试`)
+          throw new Error(`编辑失败 ${rel}：文件已被并发修改（版本不匹配）；请先 vault_read_note 重新读取，再重试编辑`)
+        }
+        if (e?.code === 'FS_NOT_OBSERVED') {
+          throw new Error(`编辑失败 ${rel}：本会话尚未读过该文件；请先 vault_read_note 再编辑`)
         }
         throw new Error(`编辑失败 ${rel}：${errorLabel(err)}`)
       }
@@ -736,12 +779,16 @@ export function registerTools(ctx: Context, config: VaultConfig): void {
           path: rel,
           operation: 'append' as const,
           addedChars: a.content.length,
-          bytes: outcome.after.length,
+          // 真实字节数（UTF-8），而不是 JS 字符串的 UTF-16 长度
+          bytes: Buffer.byteLength(outcome.after, 'utf8'),
         }
       } catch (err) {
         const e = err as { code?: string }
         if (e?.code === 'FS_STALE_VERSION') {
-          throw new Error(`追加失败 ${rel}：文件被并发修改（版本不匹配），请重试`)
+          throw new Error(`追加失败 ${rel}：文件已被并发修改（版本不匹配）；请先 vault_read_note 重新读取，再重试`)
+        }
+        if (e?.code === 'FS_NOT_OBSERVED') {
+          throw new Error(`追加失败 ${rel}：本会话尚未读过该文件；请先 vault_read_note 再追加`)
         }
         throw new Error(`追加失败 ${rel}：${errorLabel(err)}`)
       }
@@ -993,7 +1040,10 @@ export function registerTools(ctx: Context, config: VaultConfig): void {
       } catch (err) {
         const e = err as { code?: string }
         if (e?.code === 'FS_STALE_VERSION') {
-          throw new Error(`更新 frontmatter 失败 ${rel}：文件被并发修改（版本不匹配），请重试`)
+          throw new Error(`更新 frontmatter 失败 ${rel}：文件已被并发修改（版本不匹配）；请先 vault_read_note 重新读取，再重试`)
+        }
+        if (e?.code === 'FS_NOT_OBSERVED') {
+          throw new Error(`更新 frontmatter 失败 ${rel}：本会话尚未读过该文件；请先 vault_read_note 再修改`)
         }
         if (err instanceof Error && err.message.includes('frontmatter')) throw err
         throw new Error(`更新 frontmatter 失败 ${rel}：${errorLabel(err)}`)
@@ -1312,61 +1362,84 @@ export function registerTools(ctx: Context, config: VaultConfig): void {
       const newRelNoExt = newRel.replace(/\.md$/, '')
       const oldStem = stemOf(oldRel)
       const newStem = stemOf(newRel)
-      // 0) 预检阶段：只读不写。先算好所有改写内容，任何读失败都在
-      //    产生任何修改之前终止，避免半完成的重命名。
+      // 0) 预检阶段：只读不写。并行读完所有待扫描的笔记并算好改写内容，
+      //    任何读失败都在产生任何修改之前终止，避免半完成的重命名。
       const notes = await vaultNotes(fs, config, root, exec)
       const resolver = buildLinkResolver(notes)
-      // 笔记自身的自引用（[[old]] / [[dir/old]] / [x](old.md) 指向自己）也要改写到新位置。
-      const selfWl = rewriteWikilinks(content, newStem, newRel, resolver, oldRelNoExt)
-      const selfMd = rewriteMarkdownLinks(selfWl.text, newRel, resolver, oldRelNoExt, dirOf(newRel))
-      const newContent = selfMd.text
-      const selfCount = selfWl.count + selfMd.count
-      const planned: Array<{ note: VaultNote; info: FsInfo; text: string; count: number }> = []
-      for (const note of notes) {
-        if (note.path === oldRel) continue
+      const scanned = await mapLimit(notes.filter((n) => n.path !== oldRel), 8, async (note) => {
         let info: FsInfo | undefined
         try {
           info = await fs.stat(note.target, exec.signal)
         } catch (err) {
           throw new Error(`预检失败 ${note.path}：${errorLabel(err)}（尚未做任何修改）`)
         }
-        if (!info || info.type !== 'file') continue
+        if (!info || info.type !== 'file') return null
         let body: string
         try {
           body = await fs.readText(note.target, exec.signal)
         } catch (err) {
           throw new Error(`预检读取失败 ${note.path}：${errorLabel(err)}（尚未做任何修改）`)
         }
-        const wl = rewriteWikilinks(body, newStem, newRel, resolver, oldRelNoExt)
-        const md = rewriteMarkdownLinks(wl.text, newRel, resolver, oldRelNoExt, dirOf(note.path))
+        return { note, info, body }
+      })
+      // frontmatter aliases 参与链接解析：[[别名]] 指向旧笔记的引用也要改写。
+      indexAliases(resolver, scanned.flatMap((s) => s ? [{ path: s.note.path, body: s.body }] : []))
+      // 笔记自身的自引用（[[old]] / [[别名]] / [x](old.md) 指向自己）也要改写到新位置。
+      const selfWl = rewriteWikilinks(content, newStem, newRel, resolver, oldRelNoExt)
+      const selfMd = rewriteMarkdownLinks(selfWl.text, newRel, resolver, oldRelNoExt, dirOf(newRel))
+      const newContent = selfMd.text
+      const selfCount = selfWl.count + selfMd.count
+      const planned: Array<{ note: VaultNote; info: FsInfo; original: string; text: string; count: number }> = []
+      for (const s of scanned) {
+        if (!s) continue
+        const wl = rewriteWikilinks(s.body, newStem, newRel, resolver, oldRelNoExt)
+        const md = rewriteMarkdownLinks(wl.text, newRel, resolver, oldRelNoExt, dirOf(s.note.path))
         if (wl.count + md.count === 0) continue
-        planned.push({ note, info, text: md.text, count: wl.count + md.count })
+        planned.push({ note: s.note, info: s.info, original: s.body, text: md.text, count: wl.count + md.count })
       }
-      // 1) Create the new note (guarded create), with its self-links rewritten.
+      // 1) 先改写全库引用（guarded replace，可回滚）：任何失败都逆序回滚已写
+      //    文件。新文件此时尚未创建，回滚后无任何残留。
+      const updated: Array<{ path: string; count: number }> = []
+      let totalLinks = 0
+      let committed = 0
+      try {
+        for (const { note, info, text, count } of planned) {
+          try {
+            const outcome = await fs.writeText(note.target, text, { kind: 'replaceIfVersion', version: info.version }, exec.signal)
+            emitObserved(ctx, note.target, outcome.version, exec)
+          } catch (err) {
+            const e = err as { code?: string }
+            const reason = e?.code === 'FS_STALE_VERSION' ? '文件被并发修改（版本不匹配）' : errorLabel(err)
+            throw new Error(`更新引用失败 ${note.path}（${reason}）`)
+          }
+          committed++
+          updated.push({ path: note.path, count })
+          totalLinks += count
+        }
+      } catch (err) {
+        const rollbackErrors = await rollbackRewrites(ctx, fs, planned, committed, exec)
+        const base = err instanceof Error ? err.message : String(err)
+        if (rollbackErrors.length === 0) {
+          throw new Error(`${base}；已自动回滚全部 ${committed} 处引用改写，未留下任何修改。`)
+        }
+        throw new Error(`${base}；已尝试回滚 ${committed} 处引用改写，但以下文件回滚失败（请检查）：${rollbackErrors.join('；')}`)
+      }
+      // 2) 创建新文件（guarded create），内容含自引用改写。此时再失败会把
+      //    引用改写回滚掉，依旧不留残留。
       try {
         const outcome = await fs.writeText(newTarget, newContent, { kind: 'createIfAbsent' }, exec.signal)
         emitObserved(ctx, newTarget, outcome.version, exec)
       } catch (err) {
-        throw new Error(`创建 ${newRel} 失败：${errorLabel(err)}`)
-      }
-      // 2) Rewrite every reference across the vault (guarded replace).
-      const updated: Array<{ path: string; count: number }> = []
-      let totalLinks = 0
-      if (selfCount > 0) {
-        updated.push({ path: newRel, count: selfCount })
-        totalLinks += selfCount
-      }
-      for (const { note, info, text, count } of planned) {
-        try {
-          const outcome = await fs.writeText(note.target, text, { kind: 'replaceIfVersion', version: info.version }, exec.signal)
-          emitObserved(ctx, note.target, outcome.version, exec)
-        } catch (err) {
-          throw new Error(
-            `更新引用失败 ${note.path}（并发修改？）：${errorLabel(err)}。注意：新文件 ${newRel} 已创建，本次操作可能只完成了一部分，请检查后重试。`,
-          )
+        const rollbackErrors = await rollbackRewrites(ctx, fs, planned, planned.length, exec)
+        const base = `创建 ${newRel} 失败：${errorLabel(err)}`
+        if (rollbackErrors.length === 0) {
+          throw new Error(`${base}；已回滚全部 ${planned.length} 处引用改写，未留下任何修改。`)
         }
-        updated.push({ path: note.path, count })
-        totalLinks += count
+        throw new Error(`${base}；已尝试回滚引用改写，但以下文件回滚失败（请检查）：${rollbackErrors.join('；')}`)
+      }
+      if (selfCount > 0) {
+        updated.unshift({ path: newRel, count: selfCount })
+        totalLinks += selfCount
       }
       // 3) Optionally turn the old file into a redirect stub.
       let oldHandling: 'kept' | 'stubbed' = 'kept'
@@ -1377,7 +1450,7 @@ export function registerTools(ctx: Context, config: VaultConfig): void {
           emitObserved(ctx, oldTarget, outcome.version, exec)
           oldHandling = 'stubbed'
         } catch (err) {
-          throw new Error(`写跳转占位失败 ${oldRel}：${errorLabel(err)}。注意：新文件 ${newRel} 已创建，引用已更新，旧文件内容未变。`)
+          throw new Error(`写跳转占位失败 ${oldRel}：${errorLabel(err)}。重命名本身已完成（新文件 ${newRel} 已创建、引用已更新），仅旧文件内容未变。`)
         }
       }
       return { old_path: oldRel, new_path: newRel, totalLinks, updated, old_handling: oldHandling }
