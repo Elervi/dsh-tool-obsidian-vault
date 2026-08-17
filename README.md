@@ -13,8 +13,10 @@
 `~/Library/Application Support/obsidian/obsidian.json`、Linux `~/.config/obsidian/`、
 Windows `%APPDATA%\obsidian\`）自动发现本机全部 vault。每个工具都接受可选
 `vault` 参数（库名或绝对路径）指定操作目标；不传时的解析顺序为：
-调用参数 → `config.vaultRoot` → 会话工作目录（若在已发现库中）→ 当前打开的库
-→ 会话工作目录 → `process.cwd()`。`vault_list_vaults` 可查看发现结果。
+调用参数 → `config.vaultRoot` → 会话工作目录（若在已发现库中）→ dsh-dock 焦点标记的
+当前库（per-vault 隔离时即本服务所属库，由 `DSH_OBSIDIAN_VAULT_PATH` 注入，不会跨库）→
+已打开库中最近活跃者（按 `.obsidian/workspace.json` 的 mtime，平手按名称）→
+会话工作目录 → `process.cwd()`。`vault_current` 可查看当前自动解析结果与判定依据。
 
 ### 安全默认值
 
@@ -31,6 +33,7 @@ Windows `%APPDATA%\obsidian\`）自动发现本机全部 vault。每个工具都
 | 工具 | 作用 | 教什么 |
 |---|---|---|
 | `vault_list_vaults` | 列出本机全部 Obsidian 库 | 读全局配置自动发现、多库路由 |
+| `vault_current` | 返回当前自动解析的库：库名、路径与判定依据（dsh-dock 焦点标记 / 最近活跃打开库 / 会话工作目录 / cwd） | 把解析顺序落地为可观测工具、依据上报 |
 | `vault_list_notes` | 递归列出 `.md` 笔记（`all: true` 时含附件） | 参数 schema、输出 schema、`presentCall`、`getFiles` vs `getMarkdownFiles` |
 | `vault_list_folders` | 列出全部文件夹及各自的笔记数（含空文件夹） | 遍历统计、Obsidian 文件树计数 |
 | `vault_search` | 关键字/正则/多词 AND 检索（文件名+正文） | 检索工具、结果上限、摘要、增量缓存 |
@@ -59,6 +62,7 @@ Windows `%APPDATA%\obsidian\`）自动发现本机全部 vault。每个工具都
 - **搜索语法**：默认字面子串（大小写不敏感）；`regex: true` 用正则；`match_all: true` 空格分词、每词必中（AND）。
   搜索命中 `limit` 条后提前停止读取，命中稀疏时不会读完全库正文。
 - **标签**：识别正文内联 `#tag`（`#tag/子标签`）与 frontmatter `tags`/`tag` 属性，`vault_search_tags` 按 Obsidian `#tag` 语义匹配。
+- **目录遍历广度优先、按层限并发**（默认 8）：每层目录并行列出、层间设屏障，结果确定性排序——不依赖递归深度，深目录不会栈溢出。
 
 ## 从 git 安装
 
@@ -155,3 +159,9 @@ pnpm --dir . build     # tsc -p tsconfig.json → lib/
 仅用于类型。由于镜像源把 rc 包放在 `next` tag 下、`latest` 仍是旧版，
 本学习项目选择把这几包直接软链到 dsh 安装目录的同版本副本（见上方
 「从 git 安装 · 第 2 步」），typescript 单独从镜像安装。
+
+## 更新记录
+
+| 日期 | 重要更新 |
+|---|---|
+| 2026-08-17 | `vault_current` 工具（当前库判定 + 依据上报）；解析顺序优先 dsh-dock 焦点标记（`DSH_OBSIDIAN_VAULT_PATH` 注入，per-vault 即本服务所属库）；多开时按最近活跃回退；rename 事务回滚、frontmatter `aliases` 解析、markdown 尖括号路径、广度优先限并发遍历 |
