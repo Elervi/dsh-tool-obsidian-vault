@@ -22,6 +22,18 @@ export interface VaultConfig {
   maxResults: number
   /** Directory names skipped during vault walking (plus every dot-directory). */
   ignoreDirs: string[]
+  /**
+   * Allow a `vault` argument that is an absolute path to an unregistered
+   * directory. Default `false`: only discovered vaults, `vaultRoots` and
+   * `vaultRoot` may be targeted.
+   */
+  allowArbitraryRoots: boolean
+  /**
+   * Follow symlinks that resolve outside the vault root. Default `false`:
+   * note paths escaping through symlinks are rejected, and vault walks skip
+   * symlinked entries pointing outside.
+   */
+  allowSymlinkEscape: boolean
 }
 
 /** The schemastery schema the loader validates the patch `config` against. */
@@ -33,4 +45,6 @@ export const Config = z.object({
   discoverVaults: z.boolean().default(true),
   maxResults: z.number().min(1).default(20),
   ignoreDirs: z.array(z.string()).default(['.obsidian', '.git', '.claudian', '.trash']),
+  allowArbitraryRoots: z.boolean().default(false),
+  allowSymlinkEscape: z.boolean().default(false),
 })
