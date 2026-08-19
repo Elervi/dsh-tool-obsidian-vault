@@ -34,6 +34,30 @@
 - **技能**：`skills/` 目录随预设走，可增删。
 - **升级插件**：见 `vendor/dsh-tool-obsidian-vault/VENDOR.md`。
 
+## 升级
+
+`preset/` 是完整快照：升级 = 用新版本覆盖旧文件。**升级后重启 DSH**，新会话生效
+（运行中的会话沿用旧组成，直到重启）。
+
+版本号：`vendor/dsh-tool-obsidian-vault/package.json` 的 `version` 字段。
+
+**方式 A：未自定义过（或接受恢复默认）——整体替换：**
+
+```bash
+cp -R dsh-tool-obsidian-vault/preset/. ~/.dsh/.agent-presets/obsidian/
+```
+
+（把 `dsh-tool-obsidian-vault` 换成你 clone 的路径；`preset/.` 连隐藏文件一起覆盖）
+
+**方式 B：自定义过 `agent.cordis.yml` / `preset.yml` / `skills/`——只换插件快照，配置手动合并：**
+
+```bash
+rm -rf ~/.dsh/.agent-presets/obsidian/vendor
+cp -R dsh-tool-obsidian-vault/preset/vendor ~/.dsh/.agent-presets/obsidian/
+diff ~/.dsh/.agent-presets/obsidian/agent.cordis.yml dsh-tool-obsidian-vault/preset/agent.cordis.yml   # 有差异则手动合并
+diff ~/.dsh/.agent-presets/obsidian/preset.yml  dsh-tool-obsidian-vault/preset/preset.yml
+```
+
 ## 说明
 
 - 本 preset 只把工具挂到「这个模式的会话」上（agent 平面），host 平面不挂载，
