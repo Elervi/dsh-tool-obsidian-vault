@@ -3,11 +3,13 @@
 > 给 DSH（DeepSeek Harness）的 Obsidian 库工具插件：16 个 `vault_*` 工具，让 Agent
 > 直接搜索、读写本地 Obsidian 笔记，支持反向链接、frontmatter 与安全重命名。
 > 附带一个**开箱即用**的 agent preset——复制目录即安装，无需构建、无需改路径。
+> 与 Obsidian 插件 [obsidian-dsh-dock](https://github.com/Elervi/obsidian-dsh-dock)
+> **珠联璧合**：它让 DSH 住进 Obsidian，本工具让 Agent 认识 Obsidian。
 
 ## ✨ 特性
 
 - 📦 **开箱即用** — 自带自包含 preset（构建产物 + 运行时依赖已打包），无 npm / 构建 / 路径配置
-- 🗂️ **多库自动发现** — 读 Obsidian 全局注册表，自动解析当前库（dsh-dock 注入优先）
+- 🗂️ **多库自动发现** — 读 Obsidian 全局注册表，自动解析当前库；dsh-dock per-vault 注入（`DSH_OBSIDIAN_VAULT_PATH`）优先于一切猜测
 - 🔍 **16 个 vault 工具** — 搜索 / 读写 / 反链 / frontmatter / 安全重命名
 - 🔒 **安全默认** — 库外路径、符号链接越界、未注册绝对路径默认一律拒绝
 
@@ -29,6 +31,34 @@ cp -R dsh-tool-obsidian-vault/preset ~/.dsh/.agent-presets/obsidian
 > 工具只挂载到该预设（agent 平面），不污染其它模式。
 > 自定义与升级：见 [`preset/README.md`](preset/README.md)。
 
+## 🤝 与 obsidian-dsh-dock 珠联璧合
+
+[obsidian-dsh-dock](https://github.com/Elervi/obsidian-dsh-dock) 是 Obsidian 侧的小插件：
+在 Obsidian 桌面端内 spawn 官方 `dsh web`，把 DSH Web UI 嵌成侧边栏面板，并提供
+per-vault 隔离。本工具跑在 **DSH 侧**。两者一个管"门"、一个管"钥匙"，合起来就是
+开箱即用的「Obsidian 内 Agent 笔记工作流」：
+
+| 环节 | obsidian-dsh-dock（Obsidian 侧） | 本工具如何受益（DSH 侧） |
+| --- | --- | --- |
+| 启动 DSH | 点一下机器人图标，面板里就是官方 DSH Web UI | 无需自己开终端跑 `dsh web` |
+| 定位当前库 | per-vault 模式注入 `DSH_OBSIDIAN_VAULT_PATH` | 「注入的本库」在解析顺序里优先于工作目录巧合，多库同开不串 |
+| 会话工作目录 | spawn `cwd = vaultRoot` | 会话 cwd 即库根，`vault_current` 判定依据清晰 |
+| 多库并行 | 端口按库 hash 偏移互不冲突 | 每个库的 DSH 面板共享同一份 preset，工具一次装好全库可用 |
+| 配置共享 | `cordis.patch.yml` 把模型/密钥/主题指回 `~/.dsh` | 配一次全库生效，只有会话/历史按库隔离 |
+
+**三步启用即珠联璧合**：
+
+1. Obsidian 里装好并启用 **DSH Dock**（`main.js` + `manifest.json` + `styles.css`
+   复制到 `.obsidian/plugins/obsidian-dsh-dock/`）；
+2. 按上文装好本工具的 **Obsidian 模式** preset；
+3. 点 dock 的机器人图标打开面板 → 新建会话选「Obsidian 模式」→ 直接说
+   "读一下今天的笔记"、"把这段整理进 [[xxx]]"，Agent 会自动定位当前库读写，
+   无需任何路径配置。
+
+> 配套说明：只有 dock 的 DSH_HOME 模式为 **per-vault** 时才注入
+> `DSH_OBSIDIAN_VAULT_PATH`；shared 模式下本工具退回「最近活跃打开库 / 工作目录」解析。
+> 双向印证见 obsidian-dsh-dock 的 README「与 dsh-tool-obsidian-vault 联动」一节。
+
 ## 🧰 工具一览
 
 | 工具 | 作用 |
@@ -42,8 +72,9 @@ cp -R dsh-tool-obsidian-vault/preset ~/.dsh/.agent-presets/obsidian
 | `vault_backlinks` / `vault_note_links` | 反向链接 / 出链 |
 | `vault_rename_note` | 安全重命名（自动更新全库引用，失败自动回滚） |
 
-**当前库解析顺序**：`vault` 参数 → `vaultRoot` → 会话工作目录（若为库）→
-dsh-dock 注入的本库（`DSH_OBSIDIAN_VAULT_PATH`）→ 最近活跃打开库 → 工作目录。
+**当前库解析顺序**：`vault` 参数 → 配置 `vaultRoot` → dsh-dock 注入的本库
+（`DSH_OBSIDIAN_VAULT_PATH`，per-vault 模式下优先于工作目录巧合）→
+会话工作目录（若为库）→ 最近活跃打开库 → 会话工作目录 / `process.cwd()`。
 
 **安全默认**：`allowArbitraryRoots` / `allowSymlinkEscape` 默认关闭；
 笔记路径强制为库内相对路径（拒绝 `/`、盘符、`..` 穿越）。
@@ -90,10 +121,12 @@ npm run build      # tsc → lib/
 | `vault` 传绝对路径被拒 | 加入 `vaultRoots`，或 `allowArbitraryRoots: true` |
 | 符号链接目录里的笔记搜不到 | 配置 `allowSymlinkEscape: true` |
 | `Cannot find module lib/index.js` | 改过 `src/` 需重新构建 |
+| 面板里 `vault_*` 认不到当前库 | dock 需为 per-vault 模式（注入 `DSH_OBSIDIAN_VAULT_PATH`）；shared 模式退回「最近活跃库 / 工作目录」解析 |
 
 ## 📜 更新记录
 
 | 日期 | 更新 |
 | --- | --- |
+| 2026-08-19 | README 新增「与 obsidian-dsh-dock 珠联璧合」章节（配合机制 / 三步启用）；修正当前库解析顺序为「注入优先于工作目录」——README 与系统提示词（`src/prompt.ts`，已重新构建并同步 `preset/vendor`）全部对齐 `tools.ts` 实现；FAQ 补充 dock 排障 |
 | 2026-08-19 | 自包含 preset 开箱即用（`preset/`，vendor 内置构建产物与依赖）；`lib/` 入库；移除 dsh-dock 焦点标记，per-vault 以 `DSH_OBSIDIAN_VAULT_PATH` 注入为准 |
 | 2026-08-17 | `vault_current`；rename 事务回滚；frontmatter `aliases` 解析；markdown 尖括号路径；广度优先限并发遍历 |
