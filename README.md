@@ -1,75 +1,19 @@
 # dsh-tool-obsidian-vault
 
-面向本地 Obsidian vault 的 DSH 工具插件 —— 一个「插件开发方法」学习示例。
+> 给 DSH（DeepSeek Harness）的 Obsidian 库工具插件：16 个 `vault_*` 工具，让 Agent
+> 直接搜索、读写本地 Obsidian 笔记，支持反向链接、frontmatter 与安全重命名。
+> 附带一个**开箱即用**的 agent preset——复制目录即安装，无需构建、无需改路径。
 
-它导出标准 Cordis 插件形（`name` / `inject` / `Config` / `apply`），通过
-`ctx.tools.register()` 注册 16 个模型可调用的工具，并注册一条 `tools:obsidian-vault`
-提示段。所有 vault I/O 都走 `ctx.fs`（继承沙箱、原子写、版本守卫），扫描逻辑
-放在 `src/vault.ts`，工具定义放在 `src/tools.ts`。
+## ✨ 特性
 
-## 多库支持
+- 📦 **开箱即用** — 自带自包含 preset（构建产物 + 运行时依赖已打包），无 npm / 构建 / 路径配置
+- 🗂️ **多库自动发现** — 读 Obsidian 全局注册表，自动解析当前库（dsh-dock 注入优先）
+- 🔍 **16 个 vault 工具** — 搜索 / 读写 / 反链 / frontmatter / 安全重命名
+- 🔒 **安全默认** — 库外路径、符号链接越界、未注册绝对路径默认一律拒绝
 
-插件默认开启 `discoverVaults`：读取 Obsidian 全局注册表（macOS
-`~/Library/Application Support/obsidian/obsidian.json`、Linux `~/.config/obsidian/`、
-Windows `%APPDATA%\obsidian\`）自动发现本机全部 vault。每个工具都接受可选
-`vault` 参数（库名或绝对路径）指定操作目标；不传时的解析顺序为：
-调用参数 → `config.vaultRoot` → 会话工作目录（若在已发现库中）→ dsh-dock 注入的
-本服务所属库（per-vault 隔离时即当前库，由 `DSH_OBSIDIAN_VAULT_PATH` 注入，不会跨库）→
-已打开库中最近活跃者（按 `.obsidian/workspace.json` 的 mtime，平手按名称）→
-会话工作目录 → `process.cwd()`。`vault_current` 可查看当前自动解析结果与判定依据。
+## 🚀 快速安装
 
-### 安全默认值
-
-- **`allowArbitraryRoots`（默认 false）**：`vault` 参数只接受已发现的库、
-  `vaultRoots` 或 `vaultRoot` 中注册的路径；未注册的任意绝对路径一律拒绝。
-  需要操作注册表之外的库时显式开启。
-- **`allowSymlinkEscape`（默认 false）**：笔记路径经符号链接指向库外的，
-  读写被拒绝、遍历被跳过（通过 `fs.contains` 规范包含检查）。
-- 笔记路径强制为库相对路径：拒绝前导 `/`、盘符（`C:\…`）、`..` 段（Windows
-  下含 `\` 分隔），任何平台都无法穿越出库。
-
-## 工具一览
-
-| 工具 | 作用 | 教什么 |
-|---|---|---|
-| `vault_list_vaults` | 列出本机全部 Obsidian 库 | 读全局配置自动发现、多库路由 |
-| `vault_current` | 返回当前自动解析的库：库名、路径与判定依据（dsh-dock 注入的本库 / 最近活跃打开库 / 会话工作目录 / cwd） | 把解析顺序落地为可观测工具、依据上报 |
-| `vault_list_notes` | 递归列出 `.md` 笔记（`all: true` 时含附件） | 参数 schema、输出 schema、`presentCall`、`getFiles` vs `getMarkdownFiles` |
-| `vault_list_folders` | 列出全部文件夹及各自的笔记数（含空文件夹） | 遍历统计、Obsidian 文件树计数 |
-| `vault_search` | 关键字/正则/多词 AND 检索（文件名+正文） | 检索工具、结果上限、摘要、增量缓存 |
-| `vault_search_tags` | 按标签检索（内联 `#tag` + frontmatter tags，含子标签） | `#tag` 搜索语义、frontmatter 标签解析 |
-| `vault_read_note` | 读单篇笔记（按行切片） | `ctx.fs.stat` / `readText`、`FsError` 码映射、越界钳制 |
-| `vault_note_info` | 单篇综合元信息：标签/别名/出链/反链统计 | `extractTags`、markdown 链接解析、Dataview 式概览 |
-| `vault_create_note` | 新建/覆盖笔记（`unique` 自动唯一名） | `createIfAbsent` / `replaceIfVersion` 版本守卫、Obsidian 唯一名行为 |
-| `vault_edit_note` | 精准字面替换编辑（同 DSH `edit` / `vault.process`） | `editText` 字面编辑、歧义/未找到错误码映射、版本守卫 |
-| `vault_append_note` | 末尾追加（同 `vault.append`） | 读-改-写 + 版本守卫、换行胶水 |
-| `vault_backlinks` | 反向链接（`format` 支持 wikilink/markdown/all） | `[[wikilink]]` + `[text](path)` 双语法、同名笔记用 `path` 精确指定 |
-| `vault_frontmatter` | 读 frontmatter 并校验 | YAML 子集解析、问题报告 |
-| `vault_update_frontmatter` | 增删改 Properties（无 frontmatter 时自动创建） | 行级 YAML 块改写、保留字段顺序、Obsidian Properties |
-| `vault_note_links` | 列笔记的全部出链 | 链接解析（锚点/别名/嵌入） |
-| `vault_rename_note` | 重命名/移动并更新全库引用（wikilink + markdown 链接 + frontmatter aliases，`keep_old: 'stub'` 留跳转占位） | 多文件写、版本守卫、写前预检、失败逆序回滚、自引用改写、相对路径重算 |
-
-### 文件操作要点
-
-- **小改优先 `vault_edit_note`**：字面替换、默认恰好一次匹配（多次须 `replace_all: true`），带版本守卫——对应
-  [Obsidian 官方推荐的 `Vault.process()`](https://github.com/obsidianmd/obsidian-developer-docs/blob/31946e5a/en/Plugins/Vault.md) 的「读-改-写不被并发打断」。
-- **元数据用 `vault_update_frontmatter`**：`set`/`delete` 增删改 Properties，没有 frontmatter 时自动创建，保留其余字段顺序与正文。
-- **重命名是"引用先改、新文件后建"**：改写引用阶段任何失败（如并发修改导致版本失配）都会**逆序回滚**已写文件并报"未留下任何修改"；新文件 `createIfAbsent` 失败同样回滚引用。只有可选的 `keep_old: 'stub'` 失败时操作本身已完成，仅旧文件未变。
-- **`[[别名]]` 参与链接解析**：frontmatter `aliases` 会被 `vault_backlinks` 与 `vault_rename_note` 识别（对应 Obsidian 的别名解析），改名时指向旧笔记的别名链接也会被改写。
-- **markdown 链接支持尖括号带空格路径**：`[text](<my note.md>)` 在反链、改名、出链统计中都被正确处理。
-- **删除的限制**：`ctx.fs` 服务没有删除/回收站原语（对应 Obsidian 的 `vault.trash()`/`vault.delete()` 在 DSH 侧由 bash 承担），
-  所以重命名后旧文件默认保留（可用 `keep_old: 'stub'` 替换为跳转占位），彻底删除请用 bash 清理。
-- **搜索语法**：默认字面子串（大小写不敏感）；`regex: true` 用正则；`match_all: true` 空格分词、每词必中（AND）。
-  搜索命中 `limit` 条后提前停止读取，命中稀疏时不会读完全库正文。
-- **标签**：识别正文内联 `#tag`（`#tag/子标签`）与 frontmatter `tags`/`tag` 属性，`vault_search_tags` 按 Obsidian `#tag` 语义匹配。
-- **目录遍历广度优先、按层限并发**（默认 8）：每层目录并行列出、层间设屏障，结果确定性排序——不依赖递归深度，深目录不会栈溢出。
-
-## 从 git 安装
-
-### 方式一：开箱即用（推荐，无需构建）
-
-仓库自带一个**自包含 preset**（`preset/` 目录）：插件的构建产物（`lib/`）与
-运行时依赖（`vendor/.../node_modules`）都已打包进去，安装只需复制目录、重启、选模式：
+前置：已安装 DSH（`npm i -g @deepseek-ai/dsh`）并启动过一次界面。
 
 ```sh
 git clone git@github.com:Elervi/dsh-tool-obsidian-vault.git
@@ -77,66 +21,43 @@ mkdir -p ~/.dsh/.agent-presets
 cp -R dsh-tool-obsidian-vault/preset ~/.dsh/.agent-presets/obsidian
 ```
 
-- 目录名即预设 id（可改成任意小写字母/数字/连字符，如 `obsidian-lite`），无需改任何文件；
-- 重启 DSH 后新建会话，在预设选择器里选「Obsidian 模式」；
-- 会话工具列表出现 `vault_list_vaults` / `vault_current` / `vault_search` 等 16 个 `vault_*` 工具即成功；
-- 自定义与升级：见 `preset/README.md` 与 `preset/vendor/dsh-tool-obsidian-vault/VENDOR.md`。
+1. 重启 DSH，新建会话
+2. 预设选择器里选 **Obsidian 模式**
+3. 会话里出现 `vault_list_vaults` / `vault_search` 等 `vault_*` 工具即成功 ✅
 
-> 该 preset 只把工具挂到「Obsidian 模式」这一个 agent preset 上（agent 平面），
-> 不挂 host 平面，其它预设/模式不受影响。
+> 目录名即预设 id（可改成 `obsidian-lite` 等任意小写字母/数字/连字符）。
+> 工具只挂载到该预设（agent 平面），不污染其它模式。
+> 自定义与升级：见 [`preset/README.md`](preset/README.md)。
 
-### 方式二：开发者/深度定制（clone → 构建 → 挂载）
+## 🧰 工具一览
 
-> 这个插件是 **DSH（DeepSeek Harness）的工具插件**，不是 Obsidian 第三方插件——
-> 安装分四步：clone → 装依赖 → 构建 → 挂载到 DSH 的 agent preset。
+| 工具 | 作用 |
+| --- | --- |
+| `vault_list_vaults` / `vault_current` | 列出全部库 / 当前库及判定依据 |
+| `vault_list_notes` / `vault_list_folders` | 列笔记 / 列文件夹结构 |
+| `vault_search` / `vault_search_tags` | 全文检索 / 标签检索 |
+| `vault_read_note` / `vault_note_info` | 读笔记（按行切片）/ 单篇元信息 |
+| `vault_create_note` / `vault_edit_note` / `vault_append_note` | 新建 / 精准编辑 / 追加 |
+| `vault_frontmatter` / `vault_update_frontmatter` | 读 / 改 Properties |
+| `vault_backlinks` / `vault_note_links` | 反向链接 / 出链 |
+| `vault_rename_note` | 安全重命名（自动更新全库引用，失败自动回滚） |
 
-#### 0. 前置条件
+**当前库解析顺序**：`vault` 参数 → `vaultRoot` → 会话工作目录（若为库）→
+dsh-dock 注入的本库（`DSH_OBSIDIAN_VAULT_PATH`）→ 最近活跃打开库 → 工作目录。
 
-- **Node.js ≥ 20**（推荐 22+）
-- **DSH 已安装**：`npm i -g @deepseek-ai/dsh`（插件运行时依赖从 DSH 安装目录解析）
+**安全默认**：`allowArbitraryRoots` / `allowSymlinkEscape` 默认关闭；
+笔记路径强制为库内相对路径（拒绝 `/`、盘符、`..` 穿越）。
 
-#### 1. 获取代码
+## 🔧 开发者 / 深度定制
 
 ```sh
 git clone git@github.com:Elervi/dsh-tool-obsidian-vault.git
 cd dsh-tool-obsidian-vault
+npm install        # 依赖说明见下
+npm run build      # tsc → lib/
 ```
 
-#### 2. 安装依赖（关键，有坑）
-
-运行时依赖 `@deepseek-ai/dsh-tools`（`defineTool`）与 `@deepseek-ai/schemastery`（`Config`）
-是 rc 版本（`0.1.0-rc.6` / `3.18.1`），官方源通常装不到正确版本（rc 包被放在
-`next` tag 下、`latest` 仍是旧版）。**推荐做法：从 DSH 安装目录软链同版本副本**
-（类型依赖 `cordis` / `dsh-fs` / `dsh-system-prompt` 一并软链，`typescript` 正常安装）：
-
-```sh
-# typescript 等 devDependencies 正常安装
-npm install
-
-# 软链运行时 + 类型依赖（版本必须与 DSH 安装目录一致）
-DSH_PREFIX="$(npm root -g)/@deepseek-ai/dsh"
-mkdir -p node_modules/@deepseek-ai
-for p in dsh-tools cordis dsh-fs dsh-system-prompt; do
-  ln -sfn "$DSH_PREFIX/node_modules/@deepseek-ai/$p" "node_modules/@deepseek-ai/$p"
-done
-ln -sfn "$DSH_PREFIX/node_modules/schemastery" node_modules/schemastery
-```
-
-如果官方源恰好能装到这些 rc 版本（`npm install` 成功且版本匹配），可以跳过软链。
-
-#### 3. 构建
-
-```sh
-npm run build        # tsc -p tsconfig.json → lib/
-```
-
-> ⚠️ `lib/` 已随仓库提交；修改 `src/` 后需重新构建（`npm run build`）再挂载，
-> 否则挂载的是旧产物。
-
-#### 4. 挂载到 DSH（agent preset）
-
-在 agent preset 配置（如 `~/.dsh/.agent-presets/obsidian/agent.cordis.yml`）
-的 tools 层添加一行（绝对路径指向实际 clone 位置）：
+在 preset 的 `agent.cordis.yml` 里挂载：
 
 ```yaml
 - id: tool-obsidian-vault
@@ -144,47 +65,35 @@ npm run build        # tsc -p tsconfig.json → lib/
   config:
     maxResults: 20
     ignoreDirs: ['.obsidian', '.git', '.claudian', '.trash']
-    # allowArbitraryRoots: false  # 默认拒绝未注册的任意绝对路径
-    # allowSymlinkEscape: false   # 默认拒绝经符号链接越出 vault 的读写
 ```
 
-重启 DSH 会话后，vault 工具即可用。
-
-#### 5. 验证
-
-```sh
-SMOKE_VAULT=/path/to/your/vault npm test   # 对真实 vault 跑 list/search/backlinks；不设置 SMOKE_VAULT 时跳过只读测试，写测试使用系统临时目录
-```
+> ⚠️ **依赖有坑**：运行时依赖是 rc 版（`@deepseek-ai/dsh-tools@0.1.0-rc.6`），
+> peer 版本互相钳制，直接 `npm install` 会 ERESOLVE 失败。推荐从 DSH 安装目录
+> 软链同版本副本（`typescript` 正常安装）：
+>
+> ```sh
+> DSH_PREFIX="$(npm root -g)/@deepseek-ai/dsh"
+> for p in dsh-tools cordis dsh-fs dsh-system-prompt; do
+>   ln -sfn "$DSH_PREFIX/node_modules/@deepseek-ai/$p" "node_modules/@deepseek-ai/$p"
+> done
+> ln -sfn "$DSH_PREFIX/node_modules/schemastery" node_modules/schemastery
+> ```
+>
+> 改 `src/` 后重新 `npm run build`；想省事直接用 `preset/` 的自包含版本即可。
+> 本仓库同时是 DSH 插件开发方法示例（`src/tools.ts` 工具定义、`src/vault.ts` 扫描逻辑）。
 
 ### 常见问题
 
-| 现象 | 原因 | 解决 |
-| --- | --- | --- |
-| `Cannot find module lib/index.js` | clone 后未构建（`lib/` 被 gitignore） | `npm run build` |
-| ESM 解析失败 / 依赖版本报错 | 软链缺失或版本与 DSH 不一致 | 重跑第 2 步软链，确认版本与 `@deepseek-ai/dsh` 相同 |
-| 工具不出现 | 配置没生效 | 检查 preset 配置的 `name` 绝对路径，重启会话 |
-| 只能操作一个库 | 未启用多库发现 | 确认未设 `vaultRoot`，且 Obsidian 全局注册表可读（见「多库支持」） |
-| `vault` 传绝对路径被拒 | 默认只允许已注册的库 | 将该路径加入 `vaultRoots`，或配置 `allowArbitraryRoots: true` |
-| 符号链接目录里的笔记搜不到 | 链接指向库外，默认被跳过 | 配置 `allowSymlinkEscape: true` 放行 |
+| 现象 | 解决 |
+| --- | --- |
+| 工具不出现 | 检查挂载路径 / `preset/` 目录完整性，重启 DSH |
+| `vault` 传绝对路径被拒 | 加入 `vaultRoots`，或 `allowArbitraryRoots: true` |
+| 符号链接目录里的笔记搜不到 | 配置 `allowSymlinkEscape: true` |
+| `Cannot find module lib/index.js` | 改过 `src/` 需重新构建 |
 
-## 构建
+## 📜 更新记录
 
-```sh
-pnpm --dir . install   # 或见下方「离线依赖」说明
-pnpm --dir . build     # tsc -p tsconfig.json → lib/
-```
-
-## 依赖说明
-
-`@deepseek-ai/dsh-tools`（`defineTool`）与 `@deepseek-ai/schemastery`（`Config`）
-是运行时依赖；`@deepseek-ai/cordis` / `@deepseek-ai/dsh-fs` / `@deepseek-ai/dsh-system-prompt`
-仅用于类型。由于镜像源把 rc 包放在 `next` tag 下、`latest` 仍是旧版，
-本学习项目选择把这几包直接软链到 dsh 安装目录的同版本副本（见上方
-「从 git 安装 · 第 2 步」），typescript 单独从镜像安装。
-
-## 更新记录
-
-| 日期 | 重要更新 |
-|---|---|
-| 2026-08-18 | 移除 dsh-dock 焦点标记（`~/.dsh/current-vault.json`）通道：per-vault 下以 `DSH_OBSIDIAN_VAULT_PATH` 注入为准，其余回退最近活跃打开库（workspace.json mtime）；同步精简 persona 与提示段重复 |
-| 2026-08-17 | `vault_current` 工具（当前库判定 + 依据上报）；解析顺序优先 dsh-dock 注入（`DSH_OBSIDIAN_VAULT_PATH`，per-vault 即本服务所属库）；多开时按最近活跃回退；rename 事务回滚、frontmatter `aliases` 解析、markdown 尖括号路径、广度优先限并发遍历 |
+| 日期 | 更新 |
+| --- | --- |
+| 2026-08-19 | 自包含 preset 开箱即用（`preset/`，vendor 内置构建产物与依赖）；`lib/` 入库；移除 dsh-dock 焦点标记，per-vault 以 `DSH_OBSIDIAN_VAULT_PATH` 注入为准 |
+| 2026-08-17 | `vault_current`；rename 事务回滚；frontmatter `aliases` 解析；markdown 尖括号路径；广度优先限并发遍历 |
