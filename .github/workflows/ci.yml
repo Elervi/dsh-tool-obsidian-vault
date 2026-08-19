@@ -16,7 +16,12 @@ jobs:
           node-version: 22
 
       - name: Install dependencies
-        run: npm install
+        # --legacy-peer-deps: the @deepseek-ai peer chain (dsh-agent/llm/scope/...)
+        # is provided at runtime by the host dsh profile, not by npm. The rc
+        # tags on npm drift ahead of 0.1.0-rc.6 (npm resolves ^0.1.0-rc.6 to rc.7,
+        # whose transitive peers conflict with our pinned rc.6), so we skip
+        # peer resolution and only materialize the compile-time deps.
+        run: npm install --legacy-peer-deps
 
       - name: Build
         run: npm run build
