@@ -13,8 +13,8 @@
 `~/Library/Application Support/obsidian/obsidian.json`、Linux `~/.config/obsidian/`、
 Windows `%APPDATA%\obsidian\`）自动发现本机全部 vault。每个工具都接受可选
 `vault` 参数（库名或绝对路径）指定操作目标；不传时的解析顺序为：
-调用参数 → `config.vaultRoot` → 会话工作目录（若在已发现库中）→ dsh-dock 焦点标记的
-当前库（per-vault 隔离时即本服务所属库，由 `DSH_OBSIDIAN_VAULT_PATH` 注入，不会跨库）→
+调用参数 → `config.vaultRoot` → 会话工作目录（若在已发现库中）→ dsh-dock 注入的
+本服务所属库（per-vault 隔离时即当前库，由 `DSH_OBSIDIAN_VAULT_PATH` 注入，不会跨库）→
 已打开库中最近活跃者（按 `.obsidian/workspace.json` 的 mtime，平手按名称）→
 会话工作目录 → `process.cwd()`。`vault_current` 可查看当前自动解析结果与判定依据。
 
@@ -33,7 +33,7 @@ Windows `%APPDATA%\obsidian\`）自动发现本机全部 vault。每个工具都
 | 工具 | 作用 | 教什么 |
 |---|---|---|
 | `vault_list_vaults` | 列出本机全部 Obsidian 库 | 读全局配置自动发现、多库路由 |
-| `vault_current` | 返回当前自动解析的库：库名、路径与判定依据（dsh-dock 焦点标记 / 最近活跃打开库 / 会话工作目录 / cwd） | 把解析顺序落地为可观测工具、依据上报 |
+| `vault_current` | 返回当前自动解析的库：库名、路径与判定依据（dsh-dock 注入的本库 / 最近活跃打开库 / 会话工作目录 / cwd） | 把解析顺序落地为可观测工具、依据上报 |
 | `vault_list_notes` | 递归列出 `.md` 笔记（`all: true` 时含附件） | 参数 schema、输出 schema、`presentCall`、`getFiles` vs `getMarkdownFiles` |
 | `vault_list_folders` | 列出全部文件夹及各自的笔记数（含空文件夹） | 遍历统计、Obsidian 文件树计数 |
 | `vault_search` | 关键字/正则/多词 AND 检索（文件名+正文） | 检索工具、结果上限、摘要、增量缓存 |
@@ -66,21 +66,43 @@ Windows `%APPDATA%\obsidian\`）自动发现本机全部 vault。每个工具都
 
 ## 从 git 安装
 
-> 这个插件是 **DSH（DeepSeek Harness）的工具插件**，不是 Obsidian 第三方插件——安装分四步：clone → 装依赖 → 构建 → 挂载到 DSH 的 agent preset。
+### 方式一：开箱即用（推荐，无需构建）
 
-### 0. 前置条件
+仓库自带一个**自包含 preset**（`preset/` 目录）：插件的构建产物（`lib/`）与
+运行时依赖（`vendor/.../node_modules`）都已打包进去，安装只需复制目录、重启、选模式：
+
+```sh
+git clone git@github.com:Elervi/dsh-tool-obsidian-vault.git
+mkdir -p ~/.dsh/.agent-presets
+cp -R dsh-tool-obsidian-vault/preset ~/.dsh/.agent-presets/obsidian
+```
+
+- 目录名即预设 id（可改成任意小写字母/数字/连字符，如 `obsidian-lite`），无需改任何文件；
+- 重启 DSH 后新建会话，在预设选择器里选「Obsidian 模式」；
+- 会话工具列表出现 `vault_list_vaults` / `vault_current` / `vault_search` 等 16 个 `vault_*` 工具即成功；
+- 自定义与升级：见 `preset/README.md` 与 `preset/vendor/dsh-tool-obsidian-vault/VENDOR.md`。
+
+> 该 preset 只把工具挂到「Obsidian 模式」这一个 agent preset 上（agent 平面），
+> 不挂 host 平面，其它预设/模式不受影响。
+
+### 方式二：开发者/深度定制（clone → 构建 → 挂载）
+
+> 这个插件是 **DSH（DeepSeek Harness）的工具插件**，不是 Obsidian 第三方插件——
+> 安装分四步：clone → 装依赖 → 构建 → 挂载到 DSH 的 agent preset。
+
+#### 0. 前置条件
 
 - **Node.js ≥ 20**（推荐 22+）
 - **DSH 已安装**：`npm i -g @deepseek-ai/dsh`（插件运行时依赖从 DSH 安装目录解析）
 
-### 1. 获取代码
+#### 1. 获取代码
 
 ```sh
 git clone git@github.com:Elervi/dsh-tool-obsidian-vault.git
 cd dsh-tool-obsidian-vault
 ```
 
-### 2. 安装依赖（关键，有坑）
+#### 2. 安装依赖（关键，有坑）
 
 运行时依赖 `@deepseek-ai/dsh-tools`（`defineTool`）与 `@deepseek-ai/schemastery`（`Config`）
 是 rc 版本（`0.1.0-rc.6` / `3.18.1`），官方源通常装不到正确版本（rc 包被放在
@@ -102,16 +124,16 @@ ln -sfn "$DSH_PREFIX/node_modules/schemastery" node_modules/schemastery
 
 如果官方源恰好能装到这些 rc 版本（`npm install` 成功且版本匹配），可以跳过软链。
 
-### 3. 构建
+#### 3. 构建
 
 ```sh
 npm run build        # tsc -p tsconfig.json → lib/
 ```
 
-> ⚠️ `lib/` 在 `.gitignore` 中，clone 后不存在，**必须先构建**再挂载，否则会报
-> `Cannot find module .../lib/index.js`。
+> ⚠️ `lib/` 已随仓库提交；修改 `src/` 后需重新构建（`npm run build`）再挂载，
+> 否则挂载的是旧产物。
 
-### 4. 挂载到 DSH（agent preset）
+#### 4. 挂载到 DSH（agent preset）
 
 在 agent preset 配置（如 `~/.dsh/.agent-presets/obsidian/agent.cordis.yml`）
 的 tools 层添加一行（绝对路径指向实际 clone 位置）：
@@ -128,7 +150,7 @@ npm run build        # tsc -p tsconfig.json → lib/
 
 重启 DSH 会话后，vault 工具即可用。
 
-### 5. 验证
+#### 5. 验证
 
 ```sh
 SMOKE_VAULT=/path/to/your/vault npm test   # 对真实 vault 跑 list/search/backlinks；不设置 SMOKE_VAULT 时跳过只读测试，写测试使用系统临时目录
@@ -164,4 +186,5 @@ pnpm --dir . build     # tsc -p tsconfig.json → lib/
 
 | 日期 | 重要更新 |
 |---|---|
-| 2026-08-17 | `vault_current` 工具（当前库判定 + 依据上报）；解析顺序优先 dsh-dock 焦点标记（`DSH_OBSIDIAN_VAULT_PATH` 注入，per-vault 即本服务所属库）；多开时按最近活跃回退；rename 事务回滚、frontmatter `aliases` 解析、markdown 尖括号路径、广度优先限并发遍历 |
+| 2026-08-18 | 移除 dsh-dock 焦点标记（`~/.dsh/current-vault.json`）通道：per-vault 下以 `DSH_OBSIDIAN_VAULT_PATH` 注入为准，其余回退最近活跃打开库（workspace.json mtime）；同步精简 persona 与提示段重复 |
+| 2026-08-17 | `vault_current` 工具（当前库判定 + 依据上报）；解析顺序优先 dsh-dock 注入（`DSH_OBSIDIAN_VAULT_PATH`，per-vault 即本服务所属库）；多开时按最近活跃回退；rename 事务回滚、frontmatter `aliases` 解析、markdown 尖括号路径、广度优先限并发遍历 |

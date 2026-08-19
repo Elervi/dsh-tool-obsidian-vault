@@ -2,28 +2,30 @@
  * Model-facing guidance about this vault's conventions. Registered as a
  * system-prompt section named `tools:obsidian-vault`.
  *
- * The section is built dynamically at session start: `buildPromptSection()`
- * resolves the current vault (dsh-dock focus marker → most recently active
- * open vault) and prepends it, so the model already knows which vault is
- * current without calling a tool. The static part keeps the conventions and
- * the fallback instructions (use `vault_current` to re-check at runtime).
+ * The section is built dynamically at session start. When dsh-dock bound this
+ * service to a vault (`DSH_OBSIDIAN_VAULT_PATH`, per-vault isolation) the
+ * dynamic part asserts that binding so the model knows which vault is current
+ * without calling a tool. Without a binding the section says so explicitly:
+ * the session is NOT vault-bound, and the model must not claim a "current
+ * vault" (a mtime-guessed one would mislead). The static part keeps the
+ * conventions and the fallback instructions (`vault_current` re-check).
  */
-import { discoverVaults, selectCurrentVault } from './vault.js'
+import { discoverVaults, injectedVaultPath, injectedVaultName } from './vault.js'
 
-const BASE = `Obsidian vault 约定：vault 是一棵 Markdown 笔记树，笔记之间用 [[wikilink]] 或 [text](path) 互链，frontmatter（Properties）用 YAML 包裹在 --- 之间。工作流程建议：需要确认/复查当前库时用 vault_current（含判定依据；多个库同时打开时，装了 dsh-dock 则优先用其注入的本服务所属库（per-vault 隔离时即当前库），否则跟随 Obsidian 当前获得焦点的窗口，再按 .obsidian/workspace.json 的最近活跃时间取；要看全量库列表用 vault_list_vaults），用 vault_search / vault_search_tags 定位、vault_list_folders / vault_list_notes 看结构与目录，再 vault_read_note 读原文、vault_backlinks 看反向链接（库里有同名笔记时传 path 精确指定目标）。写入三件套：新建/整体覆盖用 vault_create_note（overwrite 控制是否覆盖，unique 自动生成唯一名），小范围修改优先用 vault_edit_note 做精准字面替换（比整篇重写更安全），末尾追加用 vault_append_note；元数据用 vault_frontmatter 读、vault_update_frontmatter 增删改 Properties（set/delete）。查看单篇综合信息用 vault_note_info（标签/别名/出链/反链统计）。重命名或移动笔记务必用 vault_rename_note（自动更新全库 wikilink 与 markdown 链接并改写笔记自身引用，frontmatter 的 aliases 也参与解析；失败会自动回滚已改引用，不留半完成状态；keep_old: "stub" 可在旧路径留跳转占位）。注意：ctx.fs 无删除原语，无法真正删除文件，彻底删除请用 bash rm 清理旧文件。所有 vault 工具都接受可选的 vault 参数（库名或已注册路径）来指定操作哪个库，不传时自动解析当前库（解析顺序：vault 参数 → 配置 vaultRoot → 会话工作目录若是库 → dsh-dock 注入的本服务所属库（per-vault 隔离时即本库，不会跨库）→ dsh-dock 标记的当前焦点 vault（回退：最近活跃的已打开库）→ 会话工作目录）；未注册的任意绝对路径默认被拒绝。dsh-dock 开启 per-vault 隔离时，本会话由该 vault 专属的 dsh 服务承载（独立 DSH_HOME + 独立端口），不会误操作其他库。所有路径都用 vault 根目录的相对路径（/ 分隔），vault_create_note/vault_read_note 等工具的路径可省略 .md 后缀，父目录不存在会自动创建。`
+const BASE = `Obsidian vault 约定：vault 是一棵 Markdown 笔记树，笔记之间用 [[wikilink]] 或 [text](path) 互链，frontmatter（Properties）用 YAML 包裹在 --- 之间。工作流程：先定位（vault_search / vault_search_tags，或 vault_list_folders / vault_list_notes 看结构），再 vault_read_note 读原文、vault_backlinks 看反向链接（库里有同名笔记时传 path 精确指定目标），最后才写入（vault_create_note / vault_edit_note / vault_append_note / vault_update_frontmatter，各自行为见工具描述）。重命名或移动笔记务必用 vault_rename_note（自动更新全库 wikilink 与 markdown 链接并改写笔记自身引用；失败会自动回滚；keep_old: "stub" 可留跳转占位）。注意：ctx.fs 无删除原语，彻底删除请用 bash rm 清理。所有 vault 工具都接受可选 vault 参数（库名或已注册路径），不传时自动解析当前库（解析顺序：vault 参数 → 配置 vaultRoot → 会话工作目录若是库 → dsh-dock 注入的本服务所属库（per-vault 隔离时即本库）→ 最近活跃的已打开库 → 会话工作目录）；未注册的任意绝对路径默认被拒绝。所有路径都用 vault 根目录的相对路径（/ 分隔），可省略 .md 后缀，父目录不存在会自动创建。`
 
-  /** 会话启动时求值：把当前自动解析的库（名字/路径/判定依据）拼到提示开头。 */
-  export async function buildPromptSection(): Promise<string> {
-    let current = ''
-    try {
-      const vaults = await discoverVaults()
-      const cur = selectCurrentVault(vaults)
-      if (cur) {
-        const basis = cur.current ? 'dsh-dock 焦点标记（Obsidian 当前聚焦窗口）' : '最近活跃的已打开库'
-        current = `本次会话启动时，当前自动解析的 Obsidian 库是「${cur.name}」（${cur.path}），判定依据：${basis}。会话期间窗口焦点变化后请用 vault_current 复查。\n\n`
-      }
-    } catch {
-      current = ''
-    }
-    return `${current}${BASE}`
+/** 会话启动时求值：有 dsh-dock 绑定才断言"当前库"，否则明示未绑定。 */
+export async function buildPromptSection(): Promise<string> {
+  const injected = injectedVaultPath()
+  if (injected) {
+    const name = injectedVaultName() ?? '(未知)'
+    // 注入的路径优先于任何猜测：per-vault 模式下 env 就是本服务服务的库。
+    return `本次会话已由 dsh-dock 绑定到 Obsidian 库「${name}」（${injected}），判定依据：per-vault 注入。\n\n${BASE}`
   }
+  // 无注入：不绑定任何库。模型不得把"最近活跃"之类的猜测当作当前库报告。
+  const vaults = await discoverVaults().catch(() => [])
+  const hint = vaults.length > 0
+    ? 'vault 工具会自动回退到最近活跃的已打开库，但那是猜测，不是"当前库"。'
+    : '本机未发现 Obsidian 库。'
+  return `本次会话未绑定到任何 Obsidian 库（没有 dsh-dock per-vault 注入）。${hint}用户问到"工作目录/当前库"时，报告会话工作目录即可；不要声称存在"当前库"。若用户明确要求操作某个库，先调用 vault_list_vaults 或 vault_current 确认。\n\n${BASE}`
+}

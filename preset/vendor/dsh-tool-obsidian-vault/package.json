@@ -1,0 +1,9 @@
+{
+  "name": "dsh-tool-obsidian-vault",
+  "version": "0.3.0",
+  "description": "Vendored snapshot of the dsh-tool-obsidian-vault plugin (built lib/ + runtime node_modules). Refresh procedure: see VENDOR.md.",
+  "private": true,
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts"
+}

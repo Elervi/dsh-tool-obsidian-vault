@@ -10,10 +10,9 @@ import z from '@deepseek-ai/schemastery'
  *      when it is one of the discovered vaults;
  *   4. the vault dsh-dock injected for this service
  *      (`DSH_OBSIDIAN_VAULT_PATH` env; per-vault 模式下本服务所属库，
- *      比全局焦点标记更权威 —— 在生物备课的服务里提问不会解析成生物题库);
- *   5. the vault dsh-dock marked as the focused Obsidian window
- *      (`~/.dsh/current-vault.json`), falling back to the most recently
- *      active open vault from the global registry;
+ *      最权威 —— 在 A 库的服务里提问不会解析成 B 库);
+ *   5. the most recently active open vault from the global registry
+ *      (newest `.obsidian/workspace.json` among open vaults);
  *   6. the calling session's workspace, then `process.cwd()`.
  */
 export interface VaultConfig {

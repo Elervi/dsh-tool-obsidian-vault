@@ -8,7 +8,7 @@ import {
   parseFrontmatter, rewriteWikilinks, rewriteMarkdownLinks, applyFrontmatterUpdate,
   joinRel, createBodyCache, discoverVaults, selectCurrentVault, buildLinkResolver, resolveLinkTarget,
   stemOf, dirOf, extractTags, findNotesByTag, listFolders, resolveMarkdownTarget,
-  splitListValue, mapLimit, indexAliases,
+  splitListValue, mapLimit, indexAliases, injectedVaultPath,
 } from './vault.js'
 import type { VaultNote, BacklinkFormat } from './vault.js'
 
@@ -71,25 +71,13 @@ interface CwdExec {
 }
 
 /**
- * dsh-dock 启动子进程时注入的本服务所属 vault：
- * `DSH_OBSIDIAN_VAULT_NAME` / `DSH_OBSIDIAN_VAULT_PATH`（第二通道，见
- * dsh-dock src/main.ts）。per-vault 模式下每个库有独立服务，env 就是本
- * 服务服务的库，比"当前焦点窗口"（全局 current-vault.json）更权威：
- * 在生物备课的服务里提问，绝不该解析成生物题库。shared 模式无 env，
- * 回退焦点标记。
- */
-function injectedVaultPath(): string | undefined {
-  const p = process.env.DSH_OBSIDIAN_VAULT_PATH
-  return typeof p === 'string' && p.trim().length > 0 ? p.trim() : undefined
-}
-
-/**
  * Resolve which vault root one call operates on. Order: the call's `vault`
  * argument (matched by name or path) → a pinned `config.vaultRoot` → the
- * session workspace when it is a discovered vault → the vault dsh-dock
- * injected for this service (`DSH_OBSIDIAN_VAULT_PATH`, per-vault 模式下本
- * 服务所属库) → the most recently active open vault in Obsidian (see
- * {@link selectCurrentVault}) → the session workspace → `process.cwd()`.
+ * vault dsh-dock injected for this service (`DSH_OBSIDIAN_VAULT_PATH`,
+ * per-vault 模式下本服务所属库，比工作目录巧合更权威) → the session
+ * workspace when it is a discovered vault → the most recently active open
+ * vault in Obsidian (see {@link selectCurrentVault}) → the session
+ * workspace → `process.cwd()`.
  */
 async function resolveVaultRoot(
   config: VaultConfig,
@@ -119,14 +107,17 @@ async function resolveVaultRoot(
     return norm(target)
   }
   if (config.vaultRoot && config.vaultRoot.length > 0) return norm(config.vaultRoot)
-  const cwd = exec.agent?.session?.header?.cwd
-  if (typeof cwd === 'string' && cwd.length > 0) {
-    const hit = discovered.find((v) => norm(v.path) === norm(cwd))
-    if (hit) return norm(hit.path)
-  }
+  // dsh-dock 注入优先于工作目录巧合：per-vault 模式下本服务只属于这一个
+  // 库（DSH_OBSIDIAN_VAULT_PATH），工作目录"恰好是库"只是巧合，不应压过
+  // 本服务归属（曾导致在 A 库服务里误写 B 库）。
   const injected = injectedVaultPath()
   if (injected) {
     const hit = discovered.find((v) => norm(v.path) === norm(injected))
+    if (hit) return norm(hit.path)
+  }
+  const cwd = exec.agent?.session?.header?.cwd
+  if (typeof cwd === 'string' && cwd.length > 0) {
+    const hit = discovered.find((v) => norm(v.path) === norm(cwd))
     if (hit) return norm(hit.path)
   }
   const openVault = selectCurrentVault(discovered)
@@ -145,7 +136,7 @@ interface CurrentVaultInfo {
 /**
  * 与 {@link resolveVaultRoot} 相同的解析顺序，但额外返回"判定依据"，
  * 让模型/用户一眼看清当前库是怎么选出来的（dsh-dock 注入的本库 →
- * 焦点标记 → 最近活跃打开库 → 会话工作目录 → process.cwd()）。
+ * 会话工作目录 → 最近活跃打开库 → process.cwd()）。
  */
 async function resolveCurrentVault(config: VaultConfig, exec: CwdExec): Promise<CurrentVaultInfo> {
   const discovered = config.discoverVaults ? await discoverVaults() : []
@@ -155,21 +146,22 @@ async function resolveCurrentVault(config: VaultConfig, exec: CwdExec): Promise<
     const p = norm(config.vaultRoot)
     return { name: path.basename(p), path: p, source: '配置 vaultRoot 固定指定' }
   }
-  if (typeof cwd === 'string' && cwd.length > 0) {
-    const hit = discovered.find((v) => norm(v.path) === norm(cwd))
-    if (hit) return { name: hit.name, path: norm(hit.path), source: '会话工作目录恰好是库' }
-  }
+  // 与 resolveVaultRoot 同步：dsh-dock 注入优先于工作目录巧合。
   const injected = injectedVaultPath()
   if (injected) {
     const hit = discovered.find((v) => norm(v.path) === norm(injected))
     if (hit) return { name: hit.name, path: norm(hit.path), source: 'dsh-dock 注入的本服务所属库（per-vault 隔离）' }
+  }
+  if (typeof cwd === 'string' && cwd.length > 0) {
+    const hit = discovered.find((v) => norm(v.path) === norm(cwd))
+    if (hit) return { name: hit.name, path: norm(hit.path), source: '会话工作目录恰好是库' }
   }
   const cur = selectCurrentVault(discovered)
   if (cur) {
     return {
       name: cur.name,
       path: cur.path,
-      source: cur.current ? 'dsh-dock 焦点标记（Obsidian 当前聚焦窗口）' : '最近活跃的已打开库',
+      source: '最近活跃的已打开库',
     }
   }
   const fallback = typeof cwd === 'string' && cwd.length > 0 ? cwd : process.cwd()
@@ -308,7 +300,7 @@ export function registerTools(ctx: Context, config: VaultConfig): void {
 
   ctx.tools.register(defineTool({
     name: 'vault_current',
-    description: '返回当前自动解析的 Obsidian 库：不带 vault 参数时，vault 工具默认操作哪个库，含库名、路径与判定依据（dsh-dock 焦点标记 / 最近活跃打开库 / 会话工作目录 / cwd）。',
+    description: '返回当前自动解析的 Obsidian 库：不带 vault 参数时，vault 工具默认操作哪个库，含库名、路径与判定依据（dsh-dock 注入的本库 / 最近活跃打开库 / 会话工作目录 / cwd）。',
     parameters: {},
     output: {
       schema: {

@@ -1,0 +1,3 @@
+name: Obsidian 模式
+description: 面向本地 Obsidian vault 的编码 Agent：标准模式的全部能力，加上 vault 专用工具（列表/搜索/读取/创建笔记、反向链接）与 Obsidian 写作约定。
+order: 5
