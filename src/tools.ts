@@ -2,6 +2,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
 import type { FileSystem, FsInfo, FsTarget, FsVersion } from '@deepseek-ai/dsh-fs'
 import path from 'node:path'
+import { VaultError, VaultCode, errorCode } from './errors.js'
 import type { VaultConfig } from './config.js'
 import {
   walkNotes, searchNotes, findBacklinks, extractLinks, extractMarkdownLinks,
@@ -98,10 +99,11 @@ async function resolveVaultRoot(
     const byName = discovered.find((v) => v.name === target)
     if (byName) return norm(byName.path)
     const looksAbsolute = target.startsWith('/') || /^[A-Za-z]:[\\/]/.test(target)
-    if (!looksAbsolute) throw new Error(`未知的 Obsidian 库：${target}（可用 vault_list_vaults 查看，或传绝对路径）`)
+    if (!looksAbsolute) throw new VaultError(`未知的 Obsidian 库：${target}（可用 vault_list_vaults 查看，或传绝对路径）`, VaultCode.UNKNOWN_VAULT)
     if (!config.allowArbitraryRoots) {
-      throw new Error(
+      throw new VaultError(
         `未注册的库路径：${target}（默认只允许已发现的库与 vaultRoots；如需放行任意绝对路径，请配置 allowArbitraryRoots: true）`,
+        VaultCode.ROOT_UNREGISTERED,
       )
     }
     return norm(target)
@@ -180,9 +182,9 @@ async function resolveCurrentVault(config: VaultConfig, exec: CwdExec): Promise<
  */
 function noteRelPath(input: string): string {
   const trimmed = input.trim()
-  if (trimmed === '') throw new Error('笔记路径不能为空')
+  if (trimmed === '') throw new VaultError('笔记路径不能为空', VaultCode.PATH_INVALID)
   if (/^[A-Za-z]:[\\/]/.test(trimmed) || trimmed.startsWith('/') || trimmed.startsWith('\\')) {
-    throw new Error(`笔记路径必须是 vault 相对路径（/ 分隔，不含盘符）：${trimmed}`)
+    throw new VaultError(`笔记路径必须是 vault 相对路径（/ 分隔，不含盘符）：${trimmed}`, VaultCode.PATH_INVALID)
   }
   // On Windows `\` is a path separator and must be checked like `/`; on POSIX
   // it is an ordinary filename character and can never escape the vault.
@@ -190,14 +192,14 @@ function noteRelPath(input: string): string {
     .split(process.platform === 'win32' ? /[\\/]+/ : /\/+/)
     .filter((s) => s !== '' && s !== '.')
   if (segments.includes('..')) {
-    throw new Error(`笔记路径不能包含 .. 段：${trimmed}`)
+    throw new VaultError(`笔记路径不能包含 .. 段：${trimmed}`, VaultCode.PATH_INVALID)
   }
   const joined = segments.join('/')
-  if (joined === '') throw new Error('笔记路径不能为空')
+  if (joined === '') throw new VaultError('笔记路径不能为空', VaultCode.PATH_INVALID)
   const noExt = joined.replace(/\.md$/, '')
   const base = noExt.split('/').pop() ?? ''
   if (noExt === '' || base === '' || base === '.') {
-    throw new Error(`笔记路径无效（缺少文件名）：${trimmed}`)
+    throw new VaultError(`笔记路径无效（缺少文件名）：${trimmed}`, VaultCode.PATH_INVALID)
   }
   return noExt + '.md'
 }
@@ -217,7 +219,7 @@ async function resolveNoteTarget(
   const rootTarget = await fs.resolve(root, { cwd: root })
   const target = await fs.resolve(joinRel(root, rel), { cwd: root })
   if (!allowSymlinkEscape && !fs.contains(rootTarget, target)) {
-    throw new Error(`笔记路径越出 vault（或经符号链接指向库外）：${rel}（如需放行请配置 allowSymlinkEscape: true）`)
+    throw new VaultError(`笔记路径越出 vault（或经符号链接指向库外）：${rel}（如需放行请配置 allowSymlinkEscape: true）`, VaultCode.PATH_ESCAPE)
   }
   return target
 }
@@ -432,7 +434,7 @@ export function registerTools(ctx: Context, config: VaultConfig): void {
     async execute(args, exec) {
       const a = args as { query: string; folder?: string; limit?: number; regex?: boolean; case_sensitive?: boolean; match_all?: boolean }
       const q = a.query.trim()
-      if (!q) throw new Error('query 不能为空')
+      if (!q) throw new VaultError('query 不能为空', VaultCode.INVALID_ARGS)
       const root = await resolveVaultRoot(config, exec as CwdExec, (args as { vault?: string }).vault)
       let notes = await vaultNotes(fs, config, root, exec)
       const folder = a.folder
@@ -489,7 +491,7 @@ export function registerTools(ctx: Context, config: VaultConfig): void {
     async execute(args, exec) {
       const a = args as { tag: string; folder?: string; limit?: number }
       const tag = a.tag.trim()
-      if (!tag) throw new Error('tag 不能为空')
+      if (!tag) throw new VaultError('tag 不能为空', VaultCode.INVALID_ARGS)
       const root = await resolveVaultRoot(config, exec as CwdExec, (args as { vault?: string }).vault)
       let notes = await vaultNotes(fs, config, root, exec)
       const folder = a.folder
@@ -539,8 +541,8 @@ export function registerTools(ctx: Context, config: VaultConfig): void {
       const rel = noteRelPath(a.path)
       const target = await resolveNoteTarget(fs, root, rel, config.allowSymlinkEscape)
       const info = await fs.stat(target, exec.signal)
-      if (!info) throw new Error(`笔记不存在：${rel}`)
-      if (info.type !== 'file') throw new Error(`路径不是文件：${rel}`)
+      if (!info) throw new VaultError(`笔记不存在：${rel}`, VaultCode.NOTE_NOT_FOUND)
+      if (info.type !== 'file') throw new VaultError(`路径不是文件：${rel}`, VaultCode.NOT_FILE)
       try {
         const content = await fs.readText(target, exec.signal)
         const lines = content.split('\n')
@@ -580,7 +582,7 @@ export function registerTools(ctx: Context, config: VaultConfig): void {
         if (info.size !== undefined) result.bytes = info.size
         return result
       } catch (err) {
-        throw new Error(`读取失败 ${rel}：${errorLabel(err)}`)
+        throw new VaultError(`读取失败 ${rel}：${errorLabel(err)}`, errorCode(err, 'FS_IO_ERROR'))
       }
     },
     presentCall: (args) => ({ card: 'generic', title: `读取笔记 ${(args as { path: string }).path}` }),
@@ -616,7 +618,7 @@ export function registerTools(ctx: Context, config: VaultConfig): void {
       let rel = noteRelPath(a.path)
       let target = await resolveNoteTarget(fs, root, rel, config.allowSymlinkEscape)
       let info = await fs.stat(target, exec.signal)
-      if (info && info.type !== 'file') throw new Error(`路径已存在但不是文件：${rel}`)
+      if (info && info.type !== 'file') throw new VaultError(`路径已存在但不是文件：${rel}`, VaultCode.NOT_FILE)
       if (info && a.unique) {
         // Obsidian-style unique naming: `name 1.md`, `name 2.md`, …
         const noExt = rel.replace(/\.md$/, '')
@@ -630,7 +632,7 @@ export function registerTools(ctx: Context, config: VaultConfig): void {
           i++
         }
       } else if (info && !a.overwrite) {
-        throw new Error(`笔记已存在：${rel}（如需覆盖请传 overwrite: true，或传 unique: true 生成唯一名）`)
+        throw new VaultError(`笔记已存在：${rel}（如需覆盖请传 overwrite: true，或传 unique: true 生成唯一名）`, VaultCode.EXISTS)
       }
       try {
         const intent = info
@@ -642,12 +644,12 @@ export function registerTools(ctx: Context, config: VaultConfig): void {
       } catch (err) {
         const e = err as { code?: string }
         if (e?.code === 'FS_NOT_OBSERVED') {
-          throw new Error(`写入失败 ${rel}：文件在检查后被并发创建（createIfAbsent 拒绝覆盖）；如需覆盖请传 overwrite: true 重试`)
+          throw new VaultError(`写入失败 ${rel}：文件在检查后被并发创建（createIfAbsent 拒绝覆盖）；如需覆盖请传 overwrite: true 重试`, 'FS_NOT_OBSERVED')
         }
         if (e?.code === 'FS_STALE_VERSION') {
-          throw new Error(`写入失败 ${rel}：文件在检查后被并发修改（版本不匹配）；请先 vault_read_note 重新读取，再重试`)
+          throw new VaultError(`写入失败 ${rel}：文件在检查后被并发修改（版本不匹配）；请先 vault_read_note 重新读取，再重试`, 'FS_STALE_VERSION')
         }
-        throw new Error(`写入失败 ${rel}：${errorLabel(err)}`)
+        throw new VaultError(`写入失败 ${rel}：${errorLabel(err)}`, errorCode(err, 'FS_IO_ERROR'))
       }
     },
     presentCall: (args) => ({ card: 'generic', title: `写入笔记 ${(args as { path: string }).path}` }),
@@ -688,13 +690,13 @@ export function registerTools(ctx: Context, config: VaultConfig): void {
     },
     async execute(args, exec) {
       const a = args as { path: string; old_string: string; new_string: string; replace_all?: boolean }
-      if (a.old_string === '') throw new Error('old_string 不能为空')
+      if (a.old_string === '') throw new VaultError('old_string 不能为空', VaultCode.INVALID_ARGS)
       const root = await resolveVaultRoot(config, exec as CwdExec, (args as { vault?: string }).vault)
       const rel = noteRelPath(a.path)
       const target = await resolveNoteTarget(fs, root, rel, config.allowSymlinkEscape)
       const info = await fs.stat(target, exec.signal)
-      if (!info) throw new Error(`笔记不存在：${rel}`)
-      if (info.type !== 'file') throw new Error(`路径不是文件：${rel}`)
+      if (!info) throw new VaultError(`笔记不存在：${rel}`, VaultCode.NOTE_NOT_FOUND)
+      if (info.type !== 'file') throw new VaultError(`路径不是文件：${rel}`, VaultCode.NOT_FILE)
       try {
         const outcome = await fs.editText(
           target,
@@ -710,18 +712,18 @@ export function registerTools(ctx: Context, config: VaultConfig): void {
       } catch (err) {
         const e = err as { code?: string }
         if (e?.code === 'FS_AMBIGUOUS_EDIT') {
-          throw new Error(`old_string 在 ${rel} 中出现多次（默认只允许一次精确替换）；请提供更长上下文，或设 replace_all: true`)
+          throw new VaultError(`old_string 在 ${rel} 中出现多次（默认只允许一次精确替换）；请提供更长上下文，或设 replace_all: true`, 'FS_AMBIGUOUS_EDIT')
         }
         if (e?.code === 'FS_EDIT_NOT_FOUND') {
-          throw new Error(`在 ${rel} 中未找到与 old_string 精确匹配的文本；编辑按字面匹配，请先 vault_read_note 核对原文（注意换行与首尾空白）`)
+          throw new VaultError(`在 ${rel} 中未找到与 old_string 精确匹配的文本；编辑按字面匹配，请先 vault_read_note 核对原文（注意换行与首尾空白）`, 'FS_EDIT_NOT_FOUND')
         }
         if (e?.code === 'FS_STALE_VERSION') {
-          throw new Error(`编辑失败 ${rel}：文件已被并发修改（版本不匹配）；请先 vault_read_note 重新读取，再重试编辑`)
+          throw new VaultError(`编辑失败 ${rel}：文件已被并发修改（版本不匹配）；请先 vault_read_note 重新读取，再重试编辑`, 'FS_STALE_VERSION')
         }
         if (e?.code === 'FS_NOT_OBSERVED') {
-          throw new Error(`编辑失败 ${rel}：本会话尚未读过该文件；请先 vault_read_note 再编辑`)
+          throw new VaultError(`编辑失败 ${rel}：本会话尚未读过该文件；请先 vault_read_note 再编辑`, 'FS_NOT_OBSERVED')
         }
-        throw new Error(`编辑失败 ${rel}：${errorLabel(err)}`)
+        throw new VaultError(`编辑失败 ${rel}：${errorLabel(err)}`, errorCode(err, 'FS_IO_ERROR'))
       }
     },
     presentCall: (args) => ({ card: 'generic', title: `编辑笔记 ${(args as { path: string }).path}` }),
@@ -753,13 +755,13 @@ export function registerTools(ctx: Context, config: VaultConfig): void {
     },
     async execute(args, exec) {
       const a = args as { path: string; content: string }
-      if (a.content === '') throw new Error('content 不能为空')
+      if (a.content === '') throw new VaultError('content 不能为空', VaultCode.INVALID_ARGS)
       const root = await resolveVaultRoot(config, exec as CwdExec, (args as { vault?: string }).vault)
       const rel = noteRelPath(a.path)
       const target = await resolveNoteTarget(fs, root, rel, config.allowSymlinkEscape)
       const info = await fs.stat(target, exec.signal)
-      if (!info) throw new Error(`笔记不存在：${rel}（如需新建请用 vault_create_note）`)
-      if (info.type !== 'file') throw new Error(`路径不是文件：${rel}`)
+      if (!info) throw new VaultError(`笔记不存在：${rel}（如需新建请用 vault_create_note）`, VaultCode.NOTE_NOT_FOUND)
+      if (info.type !== 'file') throw new VaultError(`路径不是文件：${rel}`, VaultCode.NOT_FILE)
       try {
         const text = await fs.readText(target, exec.signal)
         const glued = text === '' || text.endsWith('\n') || a.content.startsWith('\n')
@@ -777,12 +779,12 @@ export function registerTools(ctx: Context, config: VaultConfig): void {
       } catch (err) {
         const e = err as { code?: string }
         if (e?.code === 'FS_STALE_VERSION') {
-          throw new Error(`追加失败 ${rel}：文件已被并发修改（版本不匹配）；请先 vault_read_note 重新读取，再重试`)
+          throw new VaultError(`追加失败 ${rel}：文件已被并发修改（版本不匹配）；请先 vault_read_note 重新读取，再重试`, 'FS_STALE_VERSION')
         }
         if (e?.code === 'FS_NOT_OBSERVED') {
-          throw new Error(`追加失败 ${rel}：本会话尚未读过该文件；请先 vault_read_note 再追加`)
+          throw new VaultError(`追加失败 ${rel}：本会话尚未读过该文件；请先 vault_read_note 再追加`, 'FS_NOT_OBSERVED')
         }
-        throw new Error(`追加失败 ${rel}：${errorLabel(err)}`)
+        throw new VaultError(`追加失败 ${rel}：${errorLabel(err)}`, errorCode(err, 'FS_IO_ERROR'))
       }
     },
     presentCall: (args) => ({ card: 'generic', title: `追加内容到 ${(args as { path: string }).path}` }),
@@ -833,7 +835,7 @@ export function registerTools(ctx: Context, config: VaultConfig): void {
     async execute(args, exec) {
       const a = args as { title: string; path?: string; format?: string }
       const title = a.title.trim()
-      if (!title) throw new Error('title 不能为空')
+      if (!title) throw new VaultError('title 不能为空', VaultCode.INVALID_ARGS)
       const format: BacklinkFormat = a.format === 'markdown' ? 'markdown' : a.format === 'all' ? 'all' : 'wikilink'
       const root = await resolveVaultRoot(config, exec as CwdExec, (args as { vault?: string }).vault)
       const notes = await vaultNotes(fs, config, root, exec)
@@ -843,8 +845,8 @@ export function registerTools(ctx: Context, config: VaultConfig): void {
         const rel = noteRelPath(a.path)
         const target = await resolveNoteTarget(fs, root, rel, config.allowSymlinkEscape)
         const info = await fs.stat(target, exec.signal)
-        if (!info) throw new Error(`笔记不存在：${rel}`)
-        if (info.type !== 'file') throw new Error(`路径不是文件：${rel}`)
+        if (!info) throw new VaultError(`笔记不存在：${rel}`, VaultCode.NOTE_NOT_FOUND)
+        if (info.type !== 'file') throw new VaultError(`路径不是文件：${rel}`, VaultCode.NOT_FILE)
         targetPath = rel.replace(/\.md$/, '')
       } else {
         const candidates = notes.filter((n) => stemOf(n.path).toLowerCase() === title.toLowerCase())
@@ -914,14 +916,14 @@ export function registerTools(ctx: Context, config: VaultConfig): void {
       const rel = noteRelPath(a.path)
       const target = await resolveNoteTarget(fs, root, rel, config.allowSymlinkEscape)
       const info = await fs.stat(target, exec.signal)
-      if (!info) throw new Error(`笔记不存在：${rel}`)
-      if (info.type !== 'file') throw new Error(`路径不是文件：${rel}`)
+      if (!info) throw new VaultError(`笔记不存在：${rel}`, VaultCode.NOTE_NOT_FOUND)
+      if (info.type !== 'file') throw new VaultError(`路径不是文件：${rel}`, VaultCode.NOT_FILE)
       try {
         const content = await fs.readText(target, exec.signal)
         const parsed = parseFrontmatter(content)
         return { path: rel, present: parsed.present, valid: parsed.valid, fields: parsed.fields, issues: parsed.issues }
       } catch (err) {
-        throw new Error(`读取失败 ${rel}：${errorLabel(err)}`)
+        throw new VaultError(`读取失败 ${rel}：${errorLabel(err)}`, errorCode(err, 'FS_IO_ERROR'))
       }
     },
     presentCall: (args) => ({ card: 'generic', title: `读取 frontmatter ${(args as { path: string }).path}` }),
@@ -1000,19 +1002,19 @@ export function registerTools(ctx: Context, config: VaultConfig): void {
       const rel = noteRelPath(a.path)
       const target = await resolveNoteTarget(fs, root, rel, config.allowSymlinkEscape)
       const info = await fs.stat(target, exec.signal)
-      if (!info) throw new Error(`笔记不存在：${rel}`)
-      if (info.type !== 'file') throw new Error(`路径不是文件：${rel}`)
+      if (!info) throw new VaultError(`笔记不存在：${rel}`, VaultCode.NOTE_NOT_FOUND)
+      if (info.type !== 'file') throw new VaultError(`路径不是文件：${rel}`, VaultCode.NOT_FILE)
       const set: Record<string, string> = {}
       for (const [k, v] of Object.entries(a.set ?? {})) {
         const key = k.trim()
         if (key === '' || !/^[^:#][^:]*$/.test(key)) {
-          throw new Error(`无效的 frontmatter 字段名：${k}`)
+          throw new VaultError(`无效的 frontmatter 字段名：${k}`, VaultCode.INVALID_ARGS)
         }
         set[key] = typeof v === 'string' ? v : JSON.stringify(v)
       }
       const del = (a.delete ?? []).map((k) => k.trim()).filter((k) => k.length > 0)
       if (Object.keys(set).length === 0 && del.length === 0) {
-        throw new Error('set 与 delete 至少提供其一')
+        throw new VaultError('set 与 delete 至少提供其一', VaultCode.INVALID_ARGS)
       }
       try {
         const content = await fs.readText(target, exec.signal)
@@ -1032,13 +1034,13 @@ export function registerTools(ctx: Context, config: VaultConfig): void {
       } catch (err) {
         const e = err as { code?: string }
         if (e?.code === 'FS_STALE_VERSION') {
-          throw new Error(`更新 frontmatter 失败 ${rel}：文件已被并发修改（版本不匹配）；请先 vault_read_note 重新读取，再重试`)
+          throw new VaultError(`更新 frontmatter 失败 ${rel}：文件已被并发修改（版本不匹配）；请先 vault_read_note 重新读取，再重试`, 'FS_STALE_VERSION')
         }
         if (e?.code === 'FS_NOT_OBSERVED') {
-          throw new Error(`更新 frontmatter 失败 ${rel}：本会话尚未读过该文件；请先 vault_read_note 再修改`)
+          throw new VaultError(`更新 frontmatter 失败 ${rel}：本会话尚未读过该文件；请先 vault_read_note 再修改`, 'FS_NOT_OBSERVED')
         }
         if (err instanceof Error && err.message.includes('frontmatter')) throw err
-        throw new Error(`更新 frontmatter 失败 ${rel}：${errorLabel(err)}`)
+        throw new VaultError(`更新 frontmatter 失败 ${rel}：${errorLabel(err)}`, errorCode(err, 'FS_IO_ERROR'))
       }
     },
     presentCall: (args) => ({ card: 'generic', title: `更新 frontmatter ${(args as { path: string }).path}` }),
@@ -1087,14 +1089,14 @@ export function registerTools(ctx: Context, config: VaultConfig): void {
       const rel = noteRelPath(a.path)
       const target = await resolveNoteTarget(fs, root, rel, config.allowSymlinkEscape)
       const info = await fs.stat(target, exec.signal)
-      if (!info) throw new Error(`笔记不存在：${rel}`)
-      if (info.type !== 'file') throw new Error(`路径不是文件：${rel}`)
+      if (!info) throw new VaultError(`笔记不存在：${rel}`, VaultCode.NOTE_NOT_FOUND)
+      if (info.type !== 'file') throw new VaultError(`路径不是文件：${rel}`, VaultCode.NOT_FILE)
       try {
         const content = await fs.readText(target, exec.signal)
         const links = extractLinks(content)
         return { path: rel, total: links.length, links }
       } catch (err) {
-        throw new Error(`读取失败 ${rel}：${errorLabel(err)}`)
+        throw new VaultError(`读取失败 ${rel}：${errorLabel(err)}`, errorCode(err, 'FS_IO_ERROR'))
       }
     },
     presentCall: (args) => ({ card: 'generic', title: `列出出链 ${(args as { path: string }).path}` }),
@@ -1175,8 +1177,8 @@ export function registerTools(ctx: Context, config: VaultConfig): void {
       const rel = noteRelPath(a.path)
       const target = await resolveNoteTarget(fs, root, rel, config.allowSymlinkEscape)
       const info = await fs.stat(target, exec.signal)
-      if (!info) throw new Error(`笔记不存在：${rel}`)
-      if (info.type !== 'file') throw new Error(`路径不是文件：${rel}`)
+      if (!info) throw new VaultError(`笔记不存在：${rel}`, VaultCode.NOTE_NOT_FOUND)
+      if (info.type !== 'file') throw new VaultError(`路径不是文件：${rel}`, VaultCode.NOT_FILE)
       try {
         const content = await fs.readText(target, exec.signal)
         const fm = parseFrontmatter(content)
@@ -1219,7 +1221,7 @@ export function registerTools(ctx: Context, config: VaultConfig): void {
         if (info.size !== undefined) result.bytes = info.size
         return result
       } catch (err) {
-        throw new Error(`读取失败 ${rel}：${errorLabel(err)}`)
+        throw new VaultError(`读取失败 ${rel}：${errorLabel(err)}`, errorCode(err, 'FS_IO_ERROR'))
       }
     },
     presentCall: (args) => ({ card: 'generic', title: `笔记信息 ${(args as { path: string }).path}` }),
@@ -1331,24 +1333,24 @@ export function registerTools(ctx: Context, config: VaultConfig): void {
       const root = await resolveVaultRoot(config, exec as CwdExec, (args as { vault?: string }).vault)
       const oldRel = noteRelPath(a.old_path)
       const newRel = noteRelPath(a.new_path)
-      if (oldRel === newRel) throw new Error('新旧路径相同，无需重命名')
+      if (oldRel === newRel) throw new VaultError('新旧路径相同，无需重命名', VaultCode.INVALID_ARGS)
       const keepOld = a.keep_old === 'stub' ? 'stub' : 'keep'
       if (a.keep_old === 'delete') {
-        throw new Error('ctx.fs 无删除原语，无法真正删除旧文件；可选 keep_old: "stub" 把旧文件替换为跳转占位，或重命名后用 bash 清理旧文件')
+        throw new VaultError('ctx.fs 无删除原语，无法真正删除旧文件；可选 keep_old: "stub" 把旧文件替换为跳转占位，或重命名后用 bash 清理旧文件', VaultCode.INVALID_ARGS)
       }
       const rootTarget = await fs.resolve(root, { cwd: root })
       const oldTarget = await resolveNoteTarget(fs, root, oldRel, config.allowSymlinkEscape)
       const newTarget = await resolveNoteTarget(fs, root, newRel, config.allowSymlinkEscape)
       const oldInfo = await fs.stat(oldTarget, exec.signal)
-      if (!oldInfo) throw new Error(`笔记不存在：${oldRel}`)
-      if (oldInfo.type !== 'file') throw new Error(`路径不是文件：${oldRel}`)
+      if (!oldInfo) throw new VaultError(`笔记不存在：${oldRel}`, VaultCode.NOTE_NOT_FOUND)
+      if (oldInfo.type !== 'file') throw new VaultError(`路径不是文件：${oldRel}`, VaultCode.NOT_FILE)
       const newInfo = await fs.stat(newTarget, exec.signal)
-      if (newInfo) throw new Error(`目标已存在：${newRel}`)
+      if (newInfo) throw new VaultError(`目标已存在：${newRel}`, VaultCode.EXISTS)
       let content: string
       try {
         content = await fs.readText(oldTarget, exec.signal)
       } catch (err) {
-        throw new Error(`读取失败 ${oldRel}：${errorLabel(err)}`)
+        throw new VaultError(`读取失败 ${oldRel}：${errorLabel(err)}`, errorCode(err, 'FS_IO_ERROR'))
       }
       const oldRelNoExt = oldRel.replace(/\.md$/, '')
       const newRelNoExt = newRel.replace(/\.md$/, '')
@@ -1363,14 +1365,14 @@ export function registerTools(ctx: Context, config: VaultConfig): void {
         try {
           info = await fs.stat(note.target, exec.signal)
         } catch (err) {
-          throw new Error(`预检失败 ${note.path}：${errorLabel(err)}（尚未做任何修改）`)
+          throw new VaultError(`预检失败 ${note.path}：${errorLabel(err)}（尚未做任何修改）`, errorCode(err, 'FS_IO_ERROR'))
         }
         if (!info || info.type !== 'file') return null
         let body: string
         try {
           body = await fs.readText(note.target, exec.signal)
         } catch (err) {
-          throw new Error(`预检读取失败 ${note.path}：${errorLabel(err)}（尚未做任何修改）`)
+          throw new VaultError(`预检读取失败 ${note.path}：${errorLabel(err)}（尚未做任何修改）`, errorCode(err, 'FS_IO_ERROR'))
         }
         return { note, info, body }
       })
@@ -1402,7 +1404,7 @@ export function registerTools(ctx: Context, config: VaultConfig): void {
           } catch (err) {
             const e = err as { code?: string }
             const reason = e?.code === 'FS_STALE_VERSION' ? '文件被并发修改（版本不匹配）' : errorLabel(err)
-            throw new Error(`更新引用失败 ${note.path}（${reason}）`)
+            throw new VaultError(`更新引用失败 ${note.path}（${reason}）`, VaultCode.RENAME_UPDATE_FAILED)
           }
           committed++
           updated.push({ path: note.path, count })
@@ -1412,9 +1414,9 @@ export function registerTools(ctx: Context, config: VaultConfig): void {
         const rollbackErrors = await rollbackRewrites(ctx, fs, planned, committed, exec)
         const base = err instanceof Error ? err.message : String(err)
         if (rollbackErrors.length === 0) {
-          throw new Error(`${base}；已自动回滚全部 ${committed} 处引用改写，未留下任何修改。`)
+          throw new VaultError(`${base}；已自动回滚全部 ${committed} 处引用改写，未留下任何修改。`, errorCode(err, VaultCode.RENAME_UPDATE_FAILED))
         }
-        throw new Error(`${base}；已尝试回滚 ${committed} 处引用改写，但以下文件回滚失败（请检查）：${rollbackErrors.join('；')}`)
+        throw new VaultError(`${base}；已尝试回滚 ${committed} 处引用改写，但以下文件回滚失败（请检查）：${rollbackErrors.join('；')}`, VaultCode.RENAME_ROLLBACK_FAILED)
       }
       // 2) 创建新文件（guarded create），内容含自引用改写。此时再失败会把
       //    引用改写回滚掉，依旧不留残留。
@@ -1425,9 +1427,9 @@ export function registerTools(ctx: Context, config: VaultConfig): void {
         const rollbackErrors = await rollbackRewrites(ctx, fs, planned, planned.length, exec)
         const base = `创建 ${newRel} 失败：${errorLabel(err)}`
         if (rollbackErrors.length === 0) {
-          throw new Error(`${base}；已回滚全部 ${planned.length} 处引用改写，未留下任何修改。`)
+          throw new VaultError(`${base}；已回滚全部 ${planned.length} 处引用改写，未留下任何修改。`, errorCode(err, 'FS_IO_ERROR'))
         }
-        throw new Error(`${base}；已尝试回滚引用改写，但以下文件回滚失败（请检查）：${rollbackErrors.join('；')}`)
+        throw new VaultError(`${base}；已尝试回滚引用改写，但以下文件回滚失败（请检查）：${rollbackErrors.join('；')}`, VaultCode.RENAME_ROLLBACK_FAILED)
       }
       if (selfCount > 0) {
         updated.unshift({ path: newRel, count: selfCount })
@@ -1442,7 +1444,7 @@ export function registerTools(ctx: Context, config: VaultConfig): void {
           emitObserved(ctx, oldTarget, outcome.version, exec)
           oldHandling = 'stubbed'
         } catch (err) {
-          throw new Error(`写跳转占位失败 ${oldRel}：${errorLabel(err)}。重命名本身已完成（新文件 ${newRel} 已创建、引用已更新），仅旧文件内容未变。`)
+          throw new VaultError(`写跳转占位失败 ${oldRel}：${errorLabel(err)}。重命名本身已完成（新文件 ${newRel} 已创建、引用已更新），仅旧文件内容未变。`, VaultCode.RENAME_STUB_FAILED)
         }
       }
       return { old_path: oldRel, new_path: newRel, totalLinks, updated, old_handling: oldHandling }

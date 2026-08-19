@@ -5,6 +5,7 @@ import path from 'node:path'
 import { tmpdir } from 'node:os'
 import { registerTools } from '../lib/tools.js'
 import { Config } from '../lib/config.js'
+import { VaultCode, VaultError } from '../lib/errors.js'
 import {
   extractMarkdownLinks, resolveMarkdownTarget, rewriteMarkdownLinks, buildLinkResolver,
   indexAliases, resolveLinkTarget, parseFrontmatter,
@@ -137,7 +138,8 @@ function check(name, cond, extra = '') {
     try {
       return await tool.execute(args, { agent: undefined, signal: undefined, name, arguments: args })
     } catch (e) {
-      return { __error: e.message }
+      // 捕获错误对象本身（含 name/code），供结构化错误码断言使用
+      return { __error: e.message, __errorName: e?.name, __errorCode: e?.code }
     }
   }
   const cfg = Config({ vaultRoot: SCRATCH, ignoreDirs: [] })
@@ -151,6 +153,10 @@ function check(name, cond, extra = '') {
   const r = await call(ctx, 'vault_rename_note', { old_path: 'old', new_path: 'newname' })
   check('rename 失败返回错误', typeof r.__error === 'string', String(r.__error).slice(0, 160))
   check('错误信息含回滚提示', r.__error?.includes('回滚') ?? false, String(r.__error).slice(0, 160))
+  // 结构化错误码：VaultError 实例携带稳定 code（更新引用失败、回滚干净）
+  check('错误类是 VaultError', r.__errorName === 'VaultError', String(r.__errorName))
+  check('错误码为 VAULT_RENAME_UPDATE_FAILED', r.__errorCode === 'VAULT_RENAME_UPDATE_FAILED', String(r.__errorCode))
+  check('错误码在词表内', Object.values(VaultCode).includes(r.__errorCode), String(r.__errorCode))
   const aAfter = await readFile(path.join(SCRATCH, 'a.md'), 'utf8')
   const cAfter = await readFile(path.join(SCRATCH, 'c.md'), 'utf8')
   const newExists = await stat(path.join(SCRATCH, 'newname.md')).then(() => true).catch(() => false)
@@ -158,6 +164,18 @@ function check(name, cond, extra = '') {
   check('c.md 已回滚（保留 [[old]]）', cAfter.includes('[[old]]'), JSON.stringify(cAfter))
   check('新文件未创建（无残留）', !newExists)
   await rm(SCRATCH, { recursive: true, force: true })
+}
+
+// —— 4. 错误码词表契约 ——
+{
+  const values = Object.values(VaultCode)
+  const unique = new Set(values)
+  check('错误码全部唯一', unique.size === values.length, `${values.length} 个码`)
+  check('错误码命名符合 VAULT_ 前缀规范', values.every((v) => /^VAULT_[A-Z0-9_]+$/.test(v)))
+  check('错误码数量 ≥ 15', values.length >= 15, String(values.length))
+  // 模型通道：恢复指令必须内建于消息文本（模型看不到 info，只能读 message）
+  const renameErr = new VaultError('x；请先 vault_read_note 重新读取，再重试', VaultCode.NOTE_NOT_FOUND)
+  check('消息内建恢复指令', renameErr.message.includes('再重试'), renameErr.message)
 }
 
 console.log(failures === 0 ? '\n全部验证通过' : `\n${failures} 项验证失败`)

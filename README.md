@@ -79,6 +79,36 @@ per-vault 隔离。本工具跑在 **DSH 侧**。两者一个管"门"、一个�
 **安全默认**：`allowArbitraryRoots` / `allowSymlinkEscape` 默认关闭；
 笔记路径强制为库内相对路径（拒绝 `/`、盘符、`..` 穿越）。
 
+## 🔢 错误码（稳定契约）
+
+所有 `vault_*` 工具的失败都抛 `VaultError`（`src/errors.ts`），带两条通道：
+
+- **模型通道（`message`）**：模型只看到 `Error: <message>`，消息始终包含中文描述
+  与恢复指令（如「请先 vault_read_note 重新读取，再重试」）——模型照此行动，不解析任何码。
+- **程序通道（`code`）**：`VaultError extends HarnessError`，宿主工具注册表会把
+  `{ name: 'VaultError', code }` 放进 `ToolFailure.info`（`tool/result` 事件），
+  策略 / 重试 / 诊断按 code 路由，**绝不解析 message**。
+
+**词表**（`VaultCode`，`VAULT_*` 前缀，发布后语义不变则码不变）：
+
+| code | 含义 |
+| --- | --- |
+| `VAULT_UNKNOWN_VAULT` / `VAULT_ROOT_UNREGISTERED` | 库名未发现 / 未注册绝对路径且 `allowArbitraryRoots` 关闭 |
+| `VAULT_PATH_INVALID` / `VAULT_PATH_ESCAPE` | 笔记路径非法 / 越出库（含符号链接越界） |
+| `VAULT_INVALID_ARGS` | 参数校验失败（query/tag/old_string/content/title 为空等） |
+| `VAULT_NOTE_NOT_FOUND` / `VAULT_NOT_FILE` / `VAULT_EXISTS` | 笔记不存在 / 不是文件 / 目标已存在 |
+| `VAULT_FRONTMATTER_UNCLOSED` / `_MULTILINE` / `_NO_FIELDS` | 围栏未闭合 / 值含换行 / 无 frontmatter 却只传 delete |
+| `VAULT_REGEX_INVALID` | 正则无效 |
+| `VAULT_RENAME_UPDATE_FAILED` / `_ROLLBACK_FAILED` / `_STUB_FAILED` | 重命名改引用失败 / 回滚残留 / 写跳转占位失败 |
+
+**fs 语义失败复用宿主 `FsErrorCode`**（`FS_STALE_VERSION` / `FS_NOT_OBSERVED` /
+`FS_AMBIGUOUS_EDIT` / `FS_EDIT_NOT_FOUND` / `FS_IO_ERROR` …），不重复造码。
+
+> ⚠️ **部署差异**：`ToolFailure.info` 的提取依赖「工具的 `@deepseek-ai/dsh-llm` 与宿主
+> 是同一模块实例」。仓库开发环境（node_modules 软链到宿主）成立；`preset/` 自包含拷贝
+> 是独立实例，`info` 不会出现——但模型可见的 `message`（含恢复指令）两条路径完全一致，
+> 无功能回退。
+
 ## 🔧 开发者 / 深度定制
 
 ```sh
@@ -104,7 +134,7 @@ npm run build      # tsc → lib/
 >
 > ```sh
 > DSH_PREFIX="$(npm root -g)/@deepseek-ai/dsh"
-> for p in dsh-tools cordis dsh-fs dsh-system-prompt; do
+> for p in dsh-tools cordis dsh-fs dsh-system-prompt dsh-llm; do
 >   ln -sfn "$DSH_PREFIX/node_modules/@deepseek-ai/$p" "node_modules/@deepseek-ai/$p"
 > done
 > ln -sfn "$DSH_PREFIX/node_modules/schemastery" node_modules/schemastery
@@ -127,6 +157,7 @@ npm run build      # tsc → lib/
 
 | 日期 | 更新 |
 | --- | --- |
+| 2026-08-19 | 结构化错误码：全部失败改抛 `VaultError`（`VAULT_*` 词表 + 复用宿主 `FS_*`），宿主可路由 `ToolFailure.info`；regression 增加错误码断言；`preset/vendor` 依赖链整体对齐宿主 rc.6（此前 peer 漂到 rc.7）；版本升至 0.4.0 |
 | 2026-08-19 | README 新增「与 obsidian-dsh-dock 珠联璧合」章节（配合机制 / 三步启用）；修正当前库解析顺序为「注入优先于工作目录」——README 与系统提示词（`src/prompt.ts`，已重新构建并同步 `preset/vendor`）全部对齐 `tools.ts` 实现；FAQ 补充 dock 排障 |
 | 2026-08-19 | 自包含 preset 开箱即用（`preset/`，vendor 内置构建产物与依赖）；`lib/` 入库；移除 dsh-dock 焦点标记，per-vault 以 `DSH_OBSIDIAN_VAULT_PATH` 注入为准 |
 | 2026-08-17 | `vault_current`；rename 事务回滚；frontmatter `aliases` 解析；markdown 尖括号路径；广度优先限并发遍历 |

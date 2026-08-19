@@ -2,6 +2,7 @@ import type { FileSystem, FsTarget } from '@deepseek-ai/dsh-fs'
 import { readFile, stat } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { VaultError, VaultCode } from './errors.js'
 
 /**
  * A note (markdown, or any file when walking with `includeAll`) found while
@@ -332,7 +333,7 @@ export async function searchNotes(
     try {
       re = new RegExp(q, caseSensitive ? '' : 'i')
     } catch (err) {
-      throw new Error(`正则无效：${q}（${err instanceof Error ? err.message : String(err)}）`)
+      throw new VaultError(`正则无效：${q}（${err instanceof Error ? err.message : String(err)}）`, VaultCode.REGEX_INVALID)
     }
   }
   const tokens = !regex && matchAll ? q.split(/\s+/).filter((t) => t.length > 0) : undefined
@@ -1085,7 +1086,7 @@ export function applyFrontmatterUpdate(
 ): FrontmatterUpdateResult {
   const setEntries = Object.entries(set)
   for (const [k, v] of setEntries) {
-    if (/\n/.test(v)) throw new Error(`frontmatter 值必须单行（字段 ${k} 的取值含换行）；列表请用内联数组 [a, b]`)
+    if (/\n/.test(v)) throw new VaultError(`frontmatter 值必须单行（字段 ${k} 的取值含换行）；列表请用内联数组 [a, b]`, VaultCode.FRONTMATTER_MULTILINE)
   }
   const changes: FrontmatterChange[] = [
     ...setEntries.map(([key, value]) => ({ op: 'set' as const, key, value })),
@@ -1094,10 +1095,10 @@ export function applyFrontmatterUpdate(
   const parsed = parseFrontmatter(content)
   if (!parsed.present) {
     if (content.startsWith('---')) {
-      throw new Error('frontmatter 起始围栏未闭合，无法安全修改；请先修复笔记格式')
+      throw new VaultError('frontmatter 起始围栏未闭合，无法安全修改；请先修复笔记格式', VaultCode.FRONTMATTER_UNCLOSED)
     }
     if (setEntries.length === 0) {
-      throw new Error('笔记没有 frontmatter，无法删除字段；如需新建请同时传 set')
+      throw new VaultError('笔记没有 frontmatter，无法删除字段；如需新建请同时传 set', VaultCode.FRONTMATTER_NO_FIELDS)
     }
     const block = setEntries.map(([k, v]) => `${k}: ${v}`).join('\n')
     const fm = `---\n${block}\n---`
