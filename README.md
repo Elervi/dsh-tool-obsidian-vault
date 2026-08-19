@@ -33,31 +33,19 @@ cp -R dsh-tool-obsidian-vault/preset ~/.dsh/.agent-presets/obsidian
 
 ## 🤝 与 obsidian-dsh-dock 珠联璧合
 
-[obsidian-dsh-dock](https://github.com/Elervi/obsidian-dsh-dock) 是 Obsidian 侧的小插件：
-在 Obsidian 桌面端内 spawn 官方 `dsh web`，把 DSH Web UI 嵌成侧边栏面板，并提供
-per-vault 隔离。本工具跑在 **DSH 侧**。两者一个管"门"、一个管"钥匙"，合起来就是
-开箱即用的「Obsidian 内 Agent 笔记工作流」：
+[obsidian-dsh-dock](https://github.com/Elervi/obsidian-dsh-dock) 已上架
+[Obsidian 插件市场](https://obsidian.md/plugins?id=dsh-dock)（搜索 **DSH Dock** 一键安装），
+把官方 DSH Web UI 嵌成 Obsidian 侧边栏面板，per-vault 模式（默认）注入
+`DSH_OBSIDIAN_VAULT_PATH` 并设会话 cwd 为库根。两者一个管「门」、一个管「钥匙」：
+dock 让 DSH 住进 Obsidian，本工具让 Agent 认识 Obsidian——合起来即开箱即用的
+「Obsidian 内 Agent 笔记工作流」。
 
-| 环节 | obsidian-dsh-dock（Obsidian 侧） | 本工具如何受益（DSH 侧） |
-| --- | --- | --- |
-| 启动 DSH | 点一下机器人图标，面板里就是官方 DSH Web UI | 无需自己开终端跑 `dsh web` |
-| 定位当前库 | per-vault 模式注入 `DSH_OBSIDIAN_VAULT_PATH` | 「注入的本库」在解析顺序里优先于工作目录巧合，多库同开不串 |
-| 会话工作目录 | spawn `cwd = vaultRoot` | 会话 cwd 即库根，`vault_current` 判定依据清晰 |
-| 多库并行 | 端口按库 hash 偏移互不冲突 | 每个库的 DSH 面板共享同一份 preset，工具一次装好全库可用 |
-| 配置共享 | `cordis.patch.yml` 把模型/密钥/主题指回 `~/.dsh` | 配一次全库生效，只有会话/历史按库隔离 |
+**三步启用**：① 市场安装并启用 **DSH Dock** → ② 按上文装好本工具的 **Obsidian 模式**
+preset → ③ 面板新建会话选「Obsidian 模式」，说「读一下今天的笔记」「把这段整理进
+[[xxx]]」，Agent 自动读写当前库，无需任何路径配置。
 
-**三步启用即珠联璧合**：
-
-1. Obsidian 里装好并启用 **DSH Dock**（`main.js` + `manifest.json` + `styles.css`
-   复制到 `.obsidian/plugins/obsidian-dsh-dock/`）；
-2. 按上文装好本工具的 **Obsidian 模式** preset；
-3. 点 dock 的机器人图标打开面板 → 新建会话选「Obsidian 模式」→ 直接说
-   "读一下今天的笔记"、"把这段整理进 [[xxx]]"，Agent 会自动定位当前库读写，
-   无需任何路径配置。
-
-> 配套说明：只有 dock 的 DSH_HOME 模式为 **per-vault** 时才注入
-> `DSH_OBSIDIAN_VAULT_PATH`；shared 模式下本工具退回「最近活跃打开库 / 工作目录」解析。
-> 双向印证见 obsidian-dsh-dock 的 README「与 dsh-tool-obsidian-vault 联动」一节。
+> 仅 dock 的 **per-vault** 模式注入 `DSH_OBSIDIAN_VAULT_PATH`；shared 模式本工具退回
+> 「最近活跃打开库 / 工作目录」解析。
 
 ## 🧰 工具一览
 
@@ -157,6 +145,7 @@ npm run build      # tsc → lib/
 
 | 日期 | 更新 |
 | --- | --- |
+| 2026-08-19 | README 精简「与 obsidian-dsh-dock 珠联璧合」章节：dock 已上架 Obsidian 插件市场，三步启用改为市场一键安装（旧手动目录名 `obsidian-dsh-dock/` 有误，已随市场安装一并消除）；移除冗余对照表与失效的「双向印证」引用 |
 | 2026-08-19 | 结构化错误码：全部失败改抛 `VaultError`（`VAULT_*` 词表 + 复用宿主 `FS_*`），宿主可路由 `ToolFailure.info`；regression 增加错误码断言；`preset/vendor` 依赖链整体对齐宿主 rc.6（此前 peer 漂到 rc.7）；版本升至 0.4.0 |
 | 2026-08-19 | README 新增「与 obsidian-dsh-dock 珠联璧合」章节（配合机制 / 三步启用）；修正当前库解析顺序为「注入优先于工作目录」——README 与系统提示词（`src/prompt.ts`，已重新构建并同步 `preset/vendor`）全部对齐 `tools.ts` 实现；FAQ 补充 dock 排障 |
 | 2026-08-19 | 自包含 preset 开箱即用（`preset/`，vendor 内置构建产物与依赖）；`lib/` 入库；移除 dsh-dock 焦点标记，per-vault 以 `DSH_OBSIDIAN_VAULT_PATH` 注入为准 |
