@@ -5,10 +5,13 @@
  * The section is built dynamically at session start. When dsh-dock bound this
  * service to a vault (`DSH_OBSIDIAN_VAULT_PATH`, per-vault isolation) the
  * dynamic part asserts that binding so the model knows which vault is current
- * without calling a tool. Without a binding the section says so explicitly:
- * the session is NOT vault-bound, and the model must not claim a "current
- * vault" (a mtime-guessed one would mislead). The static part keeps the
- * conventions and the fallback instructions (`vault_current` re-check).
+ * without calling a tool. Without a binding it falls back to the session
+ * working directory: if the cwd happens to be a registered vault, that vault
+ * is asserted as current (same rule as the tools' resolution order). Only
+ * when neither applies does the section say the session is NOT vault-bound —
+ * the model must not claim a "current vault" (a mtime-guessed one would
+ * mislead). The static part keeps the conventions and the fallback
+ * instructions (`vault_current` re-check).
  */
 import { discoverVaults, injectedVaultPath, injectedVaultName } from './vault.js'
 
@@ -22,8 +25,14 @@ export async function buildPromptSection(): Promise<string> {
     // 注入的路径优先于任何猜测：per-vault 模式下 env 就是本服务服务的库。
     return `本次会话已由 dsh-dock 绑定到 Obsidian 库「${name}」（${injected}），判定依据：per-vault 注入。\n\n${BASE}`
   }
-  // 无注入：不绑定任何库。模型不得把"最近活跃"之类的猜测当作当前库报告。
+  // 无注入：若会话工作目录恰好是已注册库（工具解析顺序的兜底之一），断言该库为当前库；
+  // 否则明示未绑定，模型不得把"最近活跃"之类的猜测当作当前库报告。
   const vaults = await discoverVaults().catch(() => [])
+  const strip = (p: string) => p.replace(/[\\/]+$/, '')
+  const cwdVault = vaults.find((v) => strip(v.path) === strip(process.cwd()))
+  if (cwdVault) {
+    return `本次会话的当前 Obsidian 库为「${cwdVault.name}」（${cwdVault.path}），判定依据：会话工作目录恰好是已注册库。\n\n${BASE}`
+  }
   const hint = vaults.length > 0
     ? 'vault 工具会自动回退到最近活跃的已打开库，但那是猜测，不是"当前库"。'
     : '本机未发现 Obsidian 库。'
