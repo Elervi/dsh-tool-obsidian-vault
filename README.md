@@ -8,7 +8,7 @@
 
 ## ✨ 特性
 
-- 📦 **开箱即用** — 自带自包含 preset（构建产物 + 运行时依赖已打包），无 npm / 构建 / 路径配置
+- 📦 **一条命令安装** — `dsh plugin --profile web add -w github:Elervi/dsh-tool-obsidian-vault`，重启即装好；或手动复制自包含 preset（构建产物 + 运行时依赖已打包），无 npm / 构建 / 路径配置
 - 🗂️ **多库自动发现** — 读 Obsidian 全局注册表，自动解析当前库；dsh-dock per-vault 注入（`DSH_OBSIDIAN_VAULT_PATH`）优先于一切猜测
 - 🔌 **Obsidian API 桥（B1）** — dsh-dock 开着时工具**桥优先**：frontmatter / 出链 / 反向链接 / 标签 / 重命名引用更新全部换成 Obsidian 官方解析（metadataCache / fileManager），写后 UI 与索引即时刷新；桥不可用自动回退文件直读（`ctx.fs`），CLI 直跑不退化
 - 🔍 **20 个 vault 工具** — 搜索 / 读写 / 反链 / frontmatter / 安全重命名 / 回收站删除 / 打开笔记 / 全库标签 / 生成链接
@@ -18,19 +18,40 @@
 
 前置：已安装 DSH（`npm i -g @deepseek-ai/dsh`）并启动过一次界面。
 
+**推荐：一条命令（v0.6.0+）**
+
 ```sh
-git clone git@github.com:Elervi/dsh-tool-obsidian-vault.git
-mkdir -p ~/.dsh/.agent-presets
-cp -R dsh-tool-obsidian-vault/preset ~/.dsh/.agent-presets/obsidian
+dsh plugin --profile web add -w github:Elervi/dsh-tool-obsidian-vault
 ```
+
+（`-w`：profile 目录带 `pnpm-workspace.yaml`，pnpm 会要求显式声明添加到
+workspace 根；若你的 pnpm 已配置 `ignore-workspace-root-check`，可省略。）
+
+包作为 profile bundle 装入后，重启 `dsh web` 时会把内置的
+[`presets/obsidian/`](presets/obsidian/README.md) 自安装为 agent preset
+（落点 `~/.dsh/.agent-presets/obsidian/`，幂等：已存在则跳过，绝不覆盖你的修改）：
 
 1. 重启 DSH，新建会话
 2. 预设选择器里选 **Obsidian 模式**
 3. 会话里出现 `vault_list_vaults` / `vault_search` 等 `vault_*` 工具即成功 ✅
 
+**更新**：`dsh plugin --profile web update dsh-tool-obsidian-vault`（只更新包；
+已装好的预设副本不会被覆盖，需要最新快照时删除 `~/.dsh/.agent-presets/obsidian`
+后重启，或按 [`presets/obsidian/README.md`](presets/obsidian/README.md) 手动覆盖）。
+**卸载**：`dsh plugin --profile web remove dsh-tool-obsidian-vault`（可再删
+`~/.dsh/.agent-presets/obsidian`）。
+
+**手动安装**（任何 DSH 版本 / 非 web profile 通用）：
+
+```sh
+git clone git@github.com:Elervi/dsh-tool-obsidian-vault.git
+mkdir -p ~/.dsh/.agent-presets
+cp -R dsh-tool-obsidian-vault/presets/obsidian ~/.dsh/.agent-presets/obsidian
+```
+
 > 目录名即预设 id（可改成 `obsidian-lite` 等任意小写字母/数字/连字符）。
 > 工具只挂载到该预设（agent 平面），不污染其它模式。
-> 自定义与升级：见 [`preset/README.md`](preset/README.md)。
+> 自定义与升级：见 [`presets/obsidian/README.md`](presets/obsidian/README.md)。
 
 ## 🤝 与 obsidian-dsh-dock 珠联璧合
 
@@ -114,7 +135,7 @@ HTTP 桥（`DSH_OBSIDIAN_BRIDGE_URL/TOKEN` 经 env 与 `~/.dsh/current-vault.jso
 `FS_AMBIGUOUS_EDIT` / `FS_EDIT_NOT_FOUND` / `FS_IO_ERROR` …），不重复造码。
 
 > ⚠️ **部署差异**：`ToolFailure.info` 的提取依赖「工具的 `@deepseek-ai/dsh-llm` 与宿主
-> 是同一模块实例」。仓库开发环境（node_modules 软链到宿主）成立；`preset/` 自包含拷贝
+> 是同一模块实例」。仓库开发环境（node_modules 软链到宿主）成立；`presets/obsidian/` 自包含拷贝
 > 是独立实例，`info` 不会出现——但模型可见的 `message`（含恢复指令）两条路径完全一致，
 > 无功能回退。
 
@@ -149,17 +170,17 @@ npm run build      # tsc → lib/
 > ln -sfn "$DSH_PREFIX/node_modules/schemastery" node_modules/schemastery
 > ```
 >
-> 改 `src/` 后重新 `npm run build`；想省事直接用 `preset/` 的自包含版本即可。
+> 改 `src/` 后重新 `npm run build`；想省事直接用 `presets/obsidian/` 的自包含版本即可。
 > 本仓库同时是 DSH 插件开发方法示例（`src/tools.ts` 工具定义、`src/vault.ts` 扫描逻辑）。
 
 ### 常见问题
 
 | 现象 | 解决 |
 | --- | --- |
-| 工具不出现 | 检查挂载路径 / `preset/` 目录完整性，重启 DSH |
+| 工具不出现 | 检查挂载路径 / `presets/obsidian/` 目录完整性，重启 DSH |
 | `vault` 传绝对路径被拒 | 加入 `vaultRoots`，或 `allowArbitraryRoots: true` |
 | 符号链接目录里的笔记搜不到 | 配置 `allowSymlinkEscape: true` |
-| `Cannot find module lib/index.js` | 改过 `src/` 需重新构建；自包含 preset 用户需替换 `preset/vendor` 或整体重装 |
+| `Cannot find module lib/index.js` | 改过 `src/` 需重新构建；自包含 preset 用户需替换 `presets/obsidian/vendor` 或整体重装 |
 | 面板里 `vault_*` 认不到当前库 | dock 需为 per-vault 模式（注入 `DSH_OBSIDIAN_VAULT_PATH`）；shared 模式退回「最近活跃库 / 工作目录」解析 |
 | 桥没生效（还在文件直读） | ① dock 设置「启用 API 桥」是否打开；② Obsidian 是否在运行；③ 桥服务的是不是当前库（`vault_current` 判定依据会显示「桥」）；④ 配置 `bridge: false` 会强制关闭 |
 | 桥模式下写入后元数据略旧 | `metadataCache` 异步索引刚写入的文件，桥读取优先用 `cachedRead`；极端场景重试一次即可 |
@@ -168,6 +189,7 @@ npm run build      # tsc → lib/
 
 | 日期 | 更新 |
 | --- | --- |
+| 2026-08-21 | **一条命令安装（v0.6.0）**：包声明 `dsh.bundle` 成为 profile bundle，`dsh plugin --profile web add -w github:Elervi/dsh-tool-obsidian-vault` 装完重启即自动把 `presets/obsidian/` 自安装为 agent preset（`~/.dsh/.agent-presets/obsidian`，幂等不覆盖）；新增 `installPreset`/`registerTools` 配置与安装器（`src/install.ts`，`$DSH_HOME` 优先、`~/.dsh` 兜底）；`preset/` 更名为 `presets/obsidian/`（目录名即预设 id） |
 | 2026-08-21 | **API 全覆盖（v0.5.0 扩展）**：补齐 4 个工具使核心 Obsidian API 全覆盖——`vault_delete_note`（`fileManager.trashFile` 回收站语义，旧版降级 `vault.trash`）、`vault_open_note`（`workspace.openLinkText`）、`vault_all_tags`（`metadataCache.getAllTags` 全库标签聚合）、`vault_note_link`（`fileManager.generateMarkdownLink` 按用户链接设置）；错误码新增 `VAULT_TRASH_UNAVAILABLE`/`VAULT_OPEN_UNAVAILABLE`；桥端点 `/v1/{trash,open,all-tags,link}`；冒烟与 vendor 同步；工具总数 16 → 20 |
 | 2026-08-21 | **Obsidian API 桥（B1，v0.5.0）**：dsh-dock 起 127.0.0.1 token 鉴权 HTTP 桥，工具侧「桥优先、文件回退」——frontmatter/出链/嵌入/标签/别名/反向链接/未解析链接换用 metadataCache 官方解析，frontmatter 修改走 fileManager.processFrontMatter，重命名走 fileManager.renameFile（按用户「自动更新内部链接」设置）；桥经 `DSH_OBSIDIAN_BRIDGE_URL/TOKEN` env + `~/.dsh/current-vault.json` 标记文件双通道发现（per-vault env 权威、shared 多窗口按标记文件匹配）；配置 `bridge: false` 可强制文件模式；新增 `src/bridge.ts` 客户端与 `scripts/smoke.mjs` 假桥集成冒烟；vendor 同步 |
 | 2026-08-19 | README 精简「与 obsidian-dsh-dock 珠联璧合」章节：dock 已上架 Obsidian 插件市场，三步启用改为市场一键安装（旧手动目录名 `obsidian-dsh-dock/` 有误，已随市场安装一并消除）；移除冗余对照表与失效的「双向印证」引用 |

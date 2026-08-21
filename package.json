@@ -1,6 +1,6 @@
 {
   "name": "dsh-tool-obsidian-vault",
-  "version": "0.4.0",
+  "version": "0.6.0",
   "description": "DSH tool plugin for Obsidian vault operations",
   "type": "module",
   "main": "lib/index.js",
@@ -13,14 +13,24 @@
     "./package.json": "./package.json"
   },
   "files": [
-    "lib"
+    "lib",
+    "presets",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
   ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "clean": "rm -rf lib",
     "prepublishOnly": "npm run clean && npm run build",
     "test": "node scripts/smoke.mjs",
-    "test:fixes": "node scripts/verify-fixes.mjs"
+    "test:fixes": "node scripts/verify-fixes.mjs",
+    "test:install": "node scripts/test-install.mjs"
   },
   "license": "MIT",
   "dependencies": {

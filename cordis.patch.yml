@@ -1,0 +1,19 @@
+# dsh-tool-obsidian-vault — 一条命令安装 bundle 层
+#
+# 安装：
+#   dsh plugin --profile web add github:Elervi/dsh-tool-obsidian-vault
+# 重启 dsh web 后，本层把包内置的 presets/obsidian/ 自安装为 agent preset
+# （落点 ~/.dsh/.agent-presets/obsidian/，与手工 cp 完全一致；幂等，已存在则
+# 跳过，绝不覆盖用户修改），随后新建会话的预设选择器里出现「Obsidian 模式」。
+#
+# 为什么是「安装 preset」而不是直接挂工具：web 面把 agent 平面工具收敛到
+# 预设（每会话挂载），预设根目录由宿主固定为「内置 config/agent-presets +
+# ~/.dsh/.agent-presets」两个，bundle 无法注册新根，所以本行只负责把预设
+# 装进 user 根。vault_* 工具仍由该 preset 在 agent 平面按会话挂载，不污染
+# 其它模式 —— registerTools: false 让本行不注册任何工具。
+- insert:
+    - id: obsidian-vault
+      name: 'dsh-tool-obsidian-vault'
+      config:
+        installPreset: true
+        registerTools: false

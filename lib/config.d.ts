@@ -42,6 +42,25 @@ export interface VaultConfig {
      * fallback). Default `true`. Turn off to always read files directly.
      */
     bridge: boolean;
+    /**
+     * Self-install the bundled agent preset (`presets/obsidian/` in this
+     * package) into `$DSH_HOME/.agent-presets/obsidian` at plugin start.
+     *
+     * This is the one-command install path: the package is added as a profile
+     * bundle (`dsh plugin --profile web add github:...`), this flag runs the
+     * copy, and the preset shows up in the new-session picker on next boot.
+     * The copy is idempotent and NEVER overwrites an existing preset — user
+     * edits under `~/.dsh/.agent-presets/obsidian/` stay untouched.
+     * Default `false` (the preset's own agent-plane mount never sets it).
+     */
+    installPreset: boolean;
+    /**
+     * Whether this mount registers the `vault_*` tools and the
+     * `tools:obsidian-vault` prompt section. The preset's agent-plane row
+     * leaves it on (default); the host-plane installer row turns it off so the
+     * tools stay confined to the preset instead of leaking into every session.
+     */
+    registerTools: boolean;
 }
 /** The schemastery schema the loader validates the patch `config` against. */
 export declare const Config: z<Schemastery.ObjectS<{
@@ -53,6 +72,8 @@ export declare const Config: z<Schemastery.ObjectS<{
     allowArbitraryRoots: z<boolean, boolean>;
     allowSymlinkEscape: z<boolean, boolean>;
     bridge: z<boolean, boolean>;
+    installPreset: z<boolean, boolean>;
+    registerTools: z<boolean, boolean>;
 }>, Schemastery.ObjectT<{
     vaultRoot: z<string, string>;
     vaultRoots: z<string[], string[]>;
@@ -62,4 +83,6 @@ export declare const Config: z<Schemastery.ObjectS<{
     allowArbitraryRoots: z<boolean, boolean>;
     allowSymlinkEscape: z<boolean, boolean>;
     bridge: z<boolean, boolean>;
+    installPreset: z<boolean, boolean>;
+    registerTools: z<boolean, boolean>;
 }>>;

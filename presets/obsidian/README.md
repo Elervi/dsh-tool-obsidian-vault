@@ -1,11 +1,23 @@
 # Obsidian 模式（自包含 preset）
 
 一个**开箱即用**的 DSH agent preset：标准模式的全部能力 + Obsidian vault 专用工具
-（列表/搜索/读取/创建/编辑笔记、反向链接、frontmatter 等 16 个 `vault_*` 工具）
+（列表/搜索/读取/创建/编辑笔记、反向链接、frontmatter 等 20 个 `vault_*` 工具）
 与 Obsidian 写作约定技能。整个目录自带插件副本（`vendor/`），不需要 npm、不需要
 改任何路径。
 
-## 安装（三步）
+## 安装
+
+**推荐（一条命令，v0.6.0+）**：包以 profile bundle 装入，重启后本目录会自动
+装进 `~/.dsh/.agent-presets/obsidian/`（幂等，已存在则跳过）：
+
+```bash
+dsh plugin --profile web add -w github:Elervi/dsh-tool-obsidian-vault
+```
+
+（`-w`：profile 目录带 `pnpm-workspace.yaml`，pnpm 要求显式声明添加到 workspace 根；
+若你的 pnpm 已配置 `ignore-workspace-root-check`，可省略。）
+
+**或手动三步**（适用于任何 DSH 版本 / 非 web profile）：
 
 前置：已安装 DSH（`npm i -g @deepseek-ai/dsh`）并至少启动过一次界面（初始化默认 profile）。
 
@@ -36,7 +48,7 @@
 
 ## 升级
 
-`preset/` 是完整快照：升级 = 用新版本覆盖旧文件。**升级后重启 DSH**，新会话生效
+`presets/obsidian/` 是完整快照：升级 = 用新版本覆盖旧文件。**升级后重启 DSH**，新会话生效
 （运行中的会话沿用旧组成，直到重启）。
 
 版本号：`vendor/dsh-tool-obsidian-vault/package.json` 的 `version` 字段。
@@ -44,18 +56,18 @@
 **方式 A：未自定义过（或接受恢复默认）——整体替换：**
 
 ```bash
-cp -R dsh-tool-obsidian-vault/preset/. ~/.dsh/.agent-presets/obsidian/
+cp -R dsh-tool-obsidian-vault/presets/obsidian/. ~/.dsh/.agent-presets/obsidian/
 ```
 
-（把 `dsh-tool-obsidian-vault` 换成你 clone 的路径；`preset/.` 连隐藏文件一起覆盖）
+（把 `dsh-tool-obsidian-vault` 换成你 clone 的路径；`presets/obsidian/.` 连隐藏文件一起覆盖）
 
 **方式 B：自定义过 `agent.cordis.yml` / `preset.yml` / `skills/`——只换插件快照，配置手动合并：**
 
 ```bash
 rm -rf ~/.dsh/.agent-presets/obsidian/vendor
-cp -R dsh-tool-obsidian-vault/preset/vendor ~/.dsh/.agent-presets/obsidian/
-diff ~/.dsh/.agent-presets/obsidian/agent.cordis.yml dsh-tool-obsidian-vault/preset/agent.cordis.yml   # 有差异则手动合并
-diff ~/.dsh/.agent-presets/obsidian/preset.yml  dsh-tool-obsidian-vault/preset/preset.yml
+cp -R dsh-tool-obsidian-vault/presets/obsidian/vendor ~/.dsh/.agent-presets/obsidian/
+diff ~/.dsh/.agent-presets/obsidian/agent.cordis.yml dsh-tool-obsidian-vault/presets/obsidian/agent.cordis.yml   # 有差异则手动合并
+diff ~/.dsh/.agent-presets/obsidian/preset.yml  dsh-tool-obsidian-vault/presets/obsidian/preset.yml
 ```
 
 ## 说明
