@@ -44,6 +44,10 @@ export const VaultCode = {
   RENAME_ROLLBACK_FAILED: 'VAULT_RENAME_ROLLBACK_FAILED',
   /** 写跳转占位失败（重命名主体已完成） */
   RENAME_STUB_FAILED: 'VAULT_RENAME_STUB_FAILED',
+  /** 回收站删除需要 dsh-dock Obsidian API 桥（文件模式无删除原语） */
+  TRASH_UNAVAILABLE: 'VAULT_TRASH_UNAVAILABLE',
+  /** 打开笔记需要 Obsidian 运行与 dsh-dock 桥 */
+  OPEN_UNAVAILABLE: 'VAULT_OPEN_UNAVAILABLE',
 } as const
 
 export type VaultCode = (typeof VaultCode)[keyof typeof VaultCode]

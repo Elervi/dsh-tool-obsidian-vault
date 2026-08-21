@@ -1,14 +1,58 @@
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import path from 'node:path';
 import { VaultError, VaultCode, errorCode } from './errors.js';
-import { walkNotes, searchNotes, findBacklinks, extractLinks, extractMarkdownLinks, parseFrontmatter, rewriteWikilinks, rewriteMarkdownLinks, applyFrontmatterUpdate, joinRel, createBodyCache, discoverVaults, selectCurrentVault, buildLinkResolver, resolveLinkTarget, stemOf, dirOf, extractTags, findNotesByTag, listFolders, resolveMarkdownTarget, splitListValue, mapLimit, indexAliases, injectedVaultPath, } from './vault.js';
-/** Read the stable `code` off a thrown `FsError` (or fall back to the message). */
+import { bridgeFor, markerBridge } from './bridge.js';
+import { walkNotes, searchNotes, findBacklinks, extractLinks, extractMarkdownLinks, parseFrontmatter, rewriteWikilinks, rewriteMarkdownLinks, applyFrontmatterUpdate, joinRel, createBodyCache, discoverVaults, selectCurrentVault, buildLinkResolver, resolveLinkTarget, stemOf, dirOf, extractTags, findNotesByTag, listFolders, resolveMarkdownTarget, splitListValue, mapLimit, indexAliases, injectedVaultPath, parseLinkBody, } from './vault.js';
+/** 读取稳定 `code` 的 FsError（或回退 message） */
 function errorLabel(err) {
     const e = err;
     if (e && typeof e === 'object' && typeof e.code === 'string') {
         return `[${e.code}] ${e.message ?? ''}`;
     }
     return err instanceof Error ? err.message : String(err);
+}
+/**
+ * 桥优先解析：config.bridge 开启时返回服务 `root` 库的桥客户端（null = 回退文件模式）。
+ * 桥不可用（未装 dsh-dock / Obsidian 未运行 / 桥服务的不是该库）一律 null。
+ */
+function bridgeOrNull(config, root, signal) {
+    if (!config.bridge)
+        return Promise.resolve(null);
+    return bridgeFor(root, signal);
+}
+/** 按行切片（vault_read_note 桥/文件两路共用） */
+function sliceNote(content, offset, limit) {
+    const lines = content.split('\n');
+    const totalLines = lines.length;
+    const off = Math.max(1, Math.floor(offset ?? 1));
+    const rawStart = off - 1;
+    if (rawStart >= totalLines) {
+        return { content: '', totalLines, from: totalLines, to: totalLines, truncated: false };
+    }
+    const lim = limit && limit > 0 ? Math.floor(limit) : undefined;
+    const end = lim !== undefined ? Math.min(totalLines, rawStart + lim) : totalLines;
+    return {
+        content: lines.slice(rawStart, end).join('\n'),
+        totalLines,
+        from: off,
+        to: end,
+        truncated: end < totalLines,
+    };
+}
+/**
+ * 桥写入成功后，把新版本观察进宿主 fs（host 的 read/write/edit 工具按
+ * fs/observed 基线工作）。fire-and-forget：观测失败不影响工具结果。
+ */
+async function observeBridgeWrite(ctx, fs, root, rel, exec) {
+    try {
+        const target = await fs.resolve(joinRel(root, rel), { cwd: root });
+        const info = await fs.stat(target, exec.signal);
+        if (info && info.type === 'file')
+            emitObserved(ctx, target, info.version, exec);
+    }
+    catch {
+        // best-effort
+    }
 }
 /**
  * Record an authoritative observation of a target we just wrote, so the host's
@@ -245,13 +289,37 @@ export function registerTools(ctx, config) {
         async execute() {
             const vaults = await discoverVaults();
             const current = selectCurrentVault(vaults);
+            // 桥优先：dsh-dock 桥服务的库就是"当前库"（比 workspace.json 活动排序更权威）
+            let bridgeCurrentPath;
+            if (config.bridge) {
+                const injected = injectedVaultPath();
+                if (injected) {
+                    const probe = await bridgeFor(injected).catch(() => null);
+                    if (probe)
+                        bridgeCurrentPath = injected;
+                }
+                if (!bridgeCurrentPath) {
+                    // 标记文件通道（shared/custom 多窗口）：标记文件指向的库即桥服务库
+                    for (const v of vaults) {
+                        const hit = await markerBridge(v.path).catch(() => null);
+                        if (hit) {
+                            bridgeCurrentPath = v.path;
+                            break;
+                        }
+                    }
+                }
+            }
             return {
                 total: vaults.length,
                 vaults: vaults.map((v) => ({
                     name: v.name,
                     path: v.path,
                     ...(v.open ? { open: true } : {}),
-                    ...(current && current.path === v.path ? { current: true } : {}),
+                    ...(bridgeCurrentPath
+                        ? { current: bridgeCurrentPath === v.path }
+                        : current && current.path === v.path
+                            ? { current: true }
+                            : {}),
                 })),
             };
         },
@@ -280,6 +348,17 @@ export function registerTools(ctx, config) {
             },
         },
         async execute(_args, exec) {
+            // 桥优先：Obsidian API 实时状态（当前笔记/库名）比 mtime 猜测权威
+            const root = await resolveVaultRoot(config, exec);
+            const bridge = await bridgeOrNull(config, root, exec.signal);
+            if (bridge) {
+                const cur = await bridge.current();
+                return {
+                    name: cur.name,
+                    path: cur.path,
+                    source: 'dsh-dock Obsidian API 桥（app.vault/workspace 实时状态）',
+                };
+            }
             return resolveCurrentVault(config, exec);
         },
         presentCall: () => ({ card: 'generic', title: '查询当前自动解析的库' }),
@@ -326,12 +405,18 @@ export function registerTools(ctx, config) {
         async execute(args, exec) {
             const a = args;
             const root = await resolveVaultRoot(config, exec, args.vault);
+            const limit = Math.max(1, Math.min(a.limit ?? 100, 1000));
+            // 桥优先：Obsidian getFiles/getMarkdownFiles 视角的准确文件集
+            const bridge = await bridgeOrNull(config, root, exec.signal);
+            if (bridge) {
+                const res = await bridge.listNotes({ folder: a.folder, all: Boolean(a.all), ignoreDirs: config.ignoreDirs });
+                return { total: res.total, notes: res.notes.slice(0, limit) };
+            }
             let notes = await vaultNotes(fs, config, root, exec, Boolean(a.all));
             const folder = a.folder;
             if (folder) {
                 notes = notes.filter((n) => inFolder(n.path, folder));
             }
-            const limit = Math.max(1, Math.min(a.limit ?? 100, 1000));
             const sliced = notes.slice(0, limit);
             return {
                 total: notes.length,
@@ -394,12 +479,26 @@ export function registerTools(ctx, config) {
             if (!q)
                 throw new VaultError('query 不能为空', VaultCode.INVALID_ARGS);
             const root = await resolveVaultRoot(config, exec, args.vault);
+            const limit = Math.max(1, Math.min(a.limit ?? config.maxResults, 200));
+            // 桥优先：Obsidian 索引视角（cachedRead 走 Obsidian 缓存）
+            const bridge = await bridgeOrNull(config, root, exec.signal);
+            if (bridge) {
+                const res = await bridge.search({
+                    q,
+                    folder: a.folder,
+                    limit,
+                    regex: a.regex,
+                    case_sensitive: a.case_sensitive,
+                    match_all: a.match_all,
+                    ignoreDirs: config.ignoreDirs,
+                });
+                return { total: res.total, hits: res.hits };
+            }
             let notes = await vaultNotes(fs, config, root, exec);
             const folder = a.folder;
             if (folder) {
                 notes = notes.filter((n) => inFolder(n.path, folder));
             }
-            const limit = Math.max(1, Math.min(a.limit ?? config.maxResults, 200));
             const hits = await searchNotes(fs, notes, q, limit, exec.signal, bodyCache, undefined, {
                 regex: a.regex,
                 caseSensitive: a.case_sensitive,
@@ -451,12 +550,18 @@ export function registerTools(ctx, config) {
             if (!tag)
                 throw new VaultError('tag 不能为空', VaultCode.INVALID_ARGS);
             const root = await resolveVaultRoot(config, exec, args.vault);
+            const limit = Math.max(1, Math.min(a.limit ?? config.maxResults, 200));
+            // 桥优先：metadataCache 的 tags 解析（含 frontmatter tags）
+            const bridge = await bridgeOrNull(config, root, exec.signal);
+            if (bridge) {
+                const res = await bridge.searchTags({ tag, folder: a.folder, limit, ignoreDirs: config.ignoreDirs });
+                return { total: res.total, hits: res.hits };
+            }
             let notes = await vaultNotes(fs, config, root, exec);
             const folder = a.folder;
             if (folder) {
                 notes = notes.filter((n) => inFolder(n.path, folder));
             }
-            const limit = Math.max(1, Math.min(a.limit ?? config.maxResults, 200));
             const hits = await findNotesByTag(fs, notes, tag, limit, exec.signal, bodyCache);
             return { total: hits.length, hits };
         },
@@ -496,6 +601,23 @@ export function registerTools(ctx, config) {
             const a = args;
             const root = await resolveVaultRoot(config, exec, args.vault);
             const rel = noteRelPath(a.path);
+            // 桥优先：vault.cachedRead 走 Obsidian 缓存
+            const bridge = await bridgeOrNull(config, root, exec.signal);
+            if (bridge) {
+                const read = await bridge.readNote(rel);
+                const sliced = sliceNote(read.content, a.offset, a.limit);
+                const result = {
+                    path: rel,
+                    content: sliced.content,
+                    totalLines: sliced.totalLines,
+                    from: sliced.from,
+                    to: sliced.to,
+                    truncated: sliced.truncated,
+                };
+                if (read.size !== undefined)
+                    result.bytes = read.size;
+                return result;
+            }
             const target = await resolveNoteTarget(fs, root, rel, config.allowSymlinkEscape);
             const info = await fs.stat(target, exec.signal);
             if (!info)
@@ -504,37 +626,14 @@ export function registerTools(ctx, config) {
                 throw new VaultError(`路径不是文件：${rel}`, VaultCode.NOT_FILE);
             try {
                 const content = await fs.readText(target, exec.signal);
-                const lines = content.split('\n');
-                const totalLines = lines.length;
-                const offset = Math.max(1, Math.floor(a.offset ?? 1));
-                const rawStart = offset - 1;
-                let from;
-                let to;
-                let sliced;
-                let truncated;
-                if (rawStart >= totalLines) {
-                    // Past EOF: an empty window anchored at the last line, so `from`/`to`
-                    // stay consistent instead of reporting `from > to`.
-                    from = totalLines;
-                    to = totalLines;
-                    sliced = '';
-                    truncated = false;
-                }
-                else {
-                    const limit = a.limit && a.limit > 0 ? Math.floor(a.limit) : undefined;
-                    const end = limit !== undefined ? Math.min(totalLines, rawStart + limit) : totalLines;
-                    sliced = lines.slice(rawStart, end).join('\n');
-                    from = offset;
-                    to = end;
-                    truncated = end < totalLines;
-                }
+                const sliced = sliceNote(content, a.offset, a.limit);
                 const result = {
                     path: rel,
-                    content: sliced,
-                    totalLines,
-                    from,
-                    to,
-                    truncated,
+                    content: sliced.content,
+                    totalLines: sliced.totalLines,
+                    from: sliced.from,
+                    to: sliced.to,
+                    truncated: sliced.truncated,
                 };
                 if (info.size !== undefined)
                     result.bytes = info.size;
@@ -574,6 +673,13 @@ export function registerTools(ctx, config) {
             const a = args;
             const root = await resolveVaultRoot(config, exec, args.vault);
             let rel = noteRelPath(a.path);
+            // 桥优先：vault.create/modify + Obsidian 唯一命名，写后 Obsidian 立即刷新 UI/索引
+            const bridge = await bridgeOrNull(config, root, exec.signal);
+            if (bridge) {
+                const res = await bridge.writeNote({ path: rel, content: a.content, overwrite: a.overwrite, unique: a.unique });
+                await observeBridgeWrite(ctx, fs, root, res.path, exec);
+                return { path: res.path, operation: res.operation };
+            }
             let target = await resolveNoteTarget(fs, root, rel, config.allowSymlinkEscape);
             let info = await fs.stat(target, exec.signal);
             if (info && info.type !== 'file')
@@ -654,6 +760,13 @@ export function registerTools(ctx, config) {
                 throw new VaultError('old_string 不能为空', VaultCode.INVALID_ARGS);
             const root = await resolveVaultRoot(config, exec, args.vault);
             const rel = noteRelPath(a.path);
+            // 桥优先：读改写走 Obsidian 缓存与 vault.modify，写后 UI/索引即时刷新
+            const bridge = await bridgeOrNull(config, root, exec.signal);
+            if (bridge) {
+                const res = await bridge.editNote({ path: rel, old_string: a.old_string, new_string: a.new_string, replace_all: a.replace_all });
+                await observeBridgeWrite(ctx, fs, root, res.path, exec);
+                return { path: rel, before: res.before, after: res.after, matches: res.matches };
+            }
             const target = await resolveNoteTarget(fs, root, rel, config.allowSymlinkEscape);
             const info = await fs.stat(target, exec.signal);
             if (!info)
@@ -717,6 +830,13 @@ export function registerTools(ctx, config) {
                 throw new VaultError('content 不能为空', VaultCode.INVALID_ARGS);
             const root = await resolveVaultRoot(config, exec, args.vault);
             const rel = noteRelPath(a.path);
+            // 桥优先：vault.append（Obsidian 原生追加语义）
+            const bridge = await bridgeOrNull(config, root, exec.signal);
+            if (bridge) {
+                const res = await bridge.appendNote(rel, a.content);
+                await observeBridgeWrite(ctx, fs, root, res.path, exec);
+                return { path: rel, operation: 'append', addedChars: res.addedChars, ...(res.bytes !== undefined ? { bytes: res.bytes } : {}) };
+            }
             const target = await resolveNoteTarget(fs, root, rel, config.allowSymlinkEscape);
             const info = await fs.stat(target, exec.signal);
             if (!info)
@@ -800,6 +920,15 @@ export function registerTools(ctx, config) {
                 throw new VaultError('title 不能为空', VaultCode.INVALID_ARGS);
             const format = a.format === 'markdown' ? 'markdown' : a.format === 'all' ? 'all' : 'wikilink';
             const root = await resolveVaultRoot(config, exec, args.vault);
+            // 桥优先：metadataCache.resolvedLinks/unresolvedLinks 的官方反向链接
+            const bridge = await bridgeOrNull(config, root, exec.signal);
+            if (bridge) {
+                if (a.path && a.path.trim()) {
+                    const rel = noteRelPath(a.path);
+                    return await bridge.backlinks({ path: rel, format });
+                }
+                return await bridge.backlinks({ title, format });
+            }
             const notes = await vaultNotes(fs, config, root, exec);
             let targetPath;
             let ambiguous = false;
@@ -879,6 +1008,11 @@ export function registerTools(ctx, config) {
             const a = args;
             const root = await resolveVaultRoot(config, exec, args.vault);
             const rel = noteRelPath(a.path);
+            // 桥优先：metadataCache 的官方 YAML frontmatter 解析
+            const bridge = await bridgeOrNull(config, root, exec.signal);
+            if (bridge) {
+                return await bridge.frontmatter(rel);
+            }
             const target = await resolveNoteTarget(fs, root, rel, config.allowSymlinkEscape);
             const info = await fs.stat(target, exec.signal);
             if (!info)
@@ -982,6 +1116,20 @@ export function registerTools(ctx, config) {
             if (Object.keys(set).length === 0 && del.length === 0) {
                 throw new VaultError('set 与 delete 至少提供其一', VaultCode.INVALID_ARGS);
             }
+            // 桥优先：fileManager.processFrontMatter 原子读写，YAML 由 Obsidian 官方序列化
+            const bridge = await bridgeOrNull(config, root, exec.signal);
+            if (bridge) {
+                const res = await bridge.updateFrontmatter({ path: rel, set, delete: del });
+                await observeBridgeWrite(ctx, fs, root, res.path, exec);
+                return {
+                    path: rel,
+                    created: res.created,
+                    changes: res.changes,
+                    before: res.before,
+                    after: res.after,
+                    issues: res.issues,
+                };
+            }
             try {
                 const content = await fs.readText(target, exec.signal);
                 const before = parseFrontmatter(content);
@@ -1054,6 +1202,22 @@ export function registerTools(ctx, config) {
             const a = args;
             const root = await resolveVaultRoot(config, exec, args.vault);
             const rel = noteRelPath(a.path);
+            // 桥优先：metadataCache.links/embeds 的官方出链解析
+            const bridge = await bridgeOrNull(config, root, exec.signal);
+            if (bridge) {
+                const meta = await bridge.metadata(rel);
+                const links = meta.wikilinks.map((w) => {
+                    const parsed = parseLinkBody(w.body, w.embedded);
+                    return {
+                        target: w.body,
+                        stem: parsed.stem,
+                        ...(parsed.anchor ? { anchor: parsed.anchor.slice(1) } : {}),
+                        ...(parsed.alias ? { alias: parsed.alias.slice(1) } : {}),
+                        embedded: w.embedded,
+                    };
+                });
+                return { path: rel, total: links.length, links };
+            }
             const target = await resolveNoteTarget(fs, root, rel, config.allowSymlinkEscape);
             const info = await fs.stat(target, exec.signal);
             if (!info)
@@ -1138,6 +1302,37 @@ export function registerTools(ctx, config) {
             const a = args;
             const root = await resolveVaultRoot(config, exec, args.vault);
             const rel = noteRelPath(a.path);
+            // 桥优先：metadataCache 官方解析（frontmatter/tags/aliases/出链/未解析）
+            // + resolvedLinks 反向链接，全部来自 Obsidian 索引
+            const bridge = await bridgeOrNull(config, root, exec.signal);
+            if (bridge) {
+                const meta = await bridge.metadata(rel);
+                const bl = await bridge.backlinks({ path: rel, format: 'all' });
+                const wikilinks = meta.wikilinks.filter((w) => !w.embedded).length;
+                const embeds = meta.wikilinks.filter((w) => w.embedded).length;
+                const markdown = meta.markdown.length;
+                const result = {
+                    path: rel,
+                    frontmatter: {
+                        present: meta.frontmatter.present,
+                        valid: true,
+                        fields: meta.frontmatter.fields.map((f) => f.key),
+                    },
+                    tags: meta.tags,
+                    aliases: meta.aliases,
+                    links: {
+                        wikilinks,
+                        embeds,
+                        markdown,
+                        unresolved: meta.unresolved,
+                        total: wikilinks + embeds + markdown,
+                    },
+                    backlinks: { total: bl.total, paths: bl.backlinks.slice(0, 10).map((h) => h.path) },
+                };
+                if (meta.size !== undefined)
+                    result.bytes = meta.size;
+                return result;
+            }
             const target = await resolveNoteTarget(fs, root, rel, config.allowSymlinkEscape);
             const info = await fs.stat(target, exec.signal);
             if (!info)
@@ -1228,6 +1423,13 @@ export function registerTools(ctx, config) {
         async execute(args, exec) {
             const a = args;
             const root = await resolveVaultRoot(config, exec, args.vault);
+            // 桥优先：Obsidian 文件树视角（含空文件夹，经 adapter.list）
+            const bridge = await bridgeOrNull(config, root, exec.signal);
+            if (bridge) {
+                const res = await bridge.listFolders({ folder: a.folder, ignoreDirs: config.ignoreDirs });
+                const limit = Math.max(1, Math.min(a.limit ?? 100, 1000));
+                return { total: res.total, folders: res.folders.slice(0, limit) };
+            }
             const rootTarget = await fs.resolve(root, { cwd: root });
             let folders = await listFolders(fs, rootTarget, config.ignoreDirs, exec.signal, !config.allowSymlinkEscape);
             const folder = a.folder?.trim();
@@ -1298,6 +1500,20 @@ export function registerTools(ctx, config) {
             const keepOld = a.keep_old === 'stub' ? 'stub' : 'keep';
             if (a.keep_old === 'delete') {
                 throw new VaultError('ctx.fs 无删除原语，无法真正删除旧文件；可选 keep_old: "stub" 把旧文件替换为跳转占位，或重命名后用 bash 清理旧文件', VaultCode.INVALID_ARGS);
+            }
+            // 桥优先：fileManager.renameFile 按用户「自动更新内部链接」设置原子更新
+            // wikilink + markdown + frontmatter 链接（Obsidian 官方重命名语义）
+            const bridge = await bridgeOrNull(config, root, exec.signal);
+            if (bridge) {
+                const res = await bridge.rename({ old_path: oldRel, new_path: newRel, keep_old: keepOld === 'stub' ? 'stub' : undefined });
+                await observeBridgeWrite(ctx, fs, root, res.new_path, exec);
+                return {
+                    old_path: res.old_path,
+                    new_path: res.new_path,
+                    totalLinks: res.totalLinks,
+                    updated: res.updated,
+                    old_handling: res.old_handling,
+                };
             }
             const rootTarget = await fs.resolve(root, { cwd: root });
             const oldTarget = await resolveNoteTarget(fs, root, oldRel, config.allowSymlinkEscape);
@@ -1427,5 +1643,178 @@ export function registerTools(ctx, config) {
             const a = args;
             return { card: 'generic', title: `重命名 ${a.old_path} → ${a.new_path}` };
         },
+    }));
+    ctx.tools.register(defineTool({
+        name: 'vault_delete_note',
+        description: '删除 Obsidian 笔记（回收站语义，可恢复）：经 dsh-dock Obsidian API 桥调用 fileManager.trashFile，按用户 Obsidian 设置移入 .trash/ 或系统回收站，Obsidian 索引同步清理。注意：需要 Obsidian 运行且装了 dsh-dock（文件直读模式无删除原语，此时请用 bash rm）。',
+        parameters: {
+            vault: { type: 'string', description: '可选：操作的目标 Obsidian 库（库名或绝对路径）；默认自动解析当前库。' },
+            path: { type: 'string', required: true, description: '笔记的 vault 相对路径，/ 分隔，可省略 .md 后缀。' },
+        },
+        output: {
+            schema: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                    path: { type: 'string', required: true },
+                    trashed: { type: 'boolean', required: true },
+                },
+            },
+            render: (_args, value) => {
+                const v = value;
+                return [{ type: 'text', text: `已将 ${v.path} 移入 Obsidian 回收站（可恢复，非永久删除）` }];
+            },
+        },
+        async execute(args, exec) {
+            const a = args;
+            const root = await resolveVaultRoot(config, exec, args.vault);
+            const rel = noteRelPath(a.path);
+            const bridge = await bridgeOrNull(config, root, exec.signal);
+            if (!bridge) {
+                throw new VaultError('回收站删除需要 dsh-dock 的 Obsidian API 桥（Obsidian 需运行中）；未检测到桥时请用 bash rm 手动删除', VaultCode.TRASH_UNAVAILABLE);
+            }
+            const res = await bridge.trashNote(rel);
+            return { path: rel, trashed: res.trashed };
+        },
+        presentCall: (args) => ({ card: 'generic', title: `删除笔记 ${args.path}（回收站）` }),
+    }));
+    ctx.tools.register(defineTool({
+        name: 'vault_open_note',
+        description: '在 Obsidian 中打开/聚焦一篇笔记（workspace.openLinkText）：写入或检索到笔记后让用户直接看到。需要 dsh-dock 桥（Obsidian 运行中）；无桥时不可用。',
+        parameters: {
+            vault: { type: 'string', description: '可选：操作的目标 Obsidian 库（库名或绝对路径）；默认自动解析当前库。' },
+            path: { type: 'string', required: true, description: '笔记的 vault 相对路径，/ 分隔，可省略 .md 后缀。' },
+        },
+        output: {
+            schema: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                    path: { type: 'string', required: true },
+                    opened: { type: 'boolean', required: true },
+                },
+            },
+            render: (_args, value) => {
+                const v = value;
+                return [{ type: 'text', text: `已在 Obsidian 中打开 ${v.path}` }];
+            },
+        },
+        async execute(args, exec) {
+            const a = args;
+            const root = await resolveVaultRoot(config, exec, args.vault);
+            const rel = noteRelPath(a.path);
+            const bridge = await bridgeOrNull(config, root, exec.signal);
+            if (!bridge) {
+                throw new VaultError('打开笔记需要 Obsidian 运行与 dsh-dock 的 Obsidian API 桥（文件直读模式无法触达 Obsidian UI）', VaultCode.OPEN_UNAVAILABLE);
+            }
+            const res = await bridge.openNote(rel);
+            return { path: rel, opened: res.opened };
+        },
+        presentCall: (args) => ({ card: 'generic', title: `在 Obsidian 中打开 ${args.path}` }),
+    }));
+    ctx.tools.register(defineTool({
+        name: 'vault_all_tags',
+        description: '列出全库标签及出现次数（同 Obsidian 标签面板）：桥模式下为 metadataCache.getAllTags 官方聚合（含 frontmatter tags），文件回退模式为扫描提取。可限定子目录。',
+        parameters: {
+            vault: { type: 'string', description: '可选：操作的目标 Obsidian 库（库名或绝对路径）；默认自动解析当前库。' },
+            folder: { type: 'string', description: '可选：只统计该子目录下的笔记（vault 相对路径，/ 分隔）。' },
+            limit: { type: 'number', description: '最多返回条数，默认 200。' },
+        },
+        output: {
+            schema: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                    total: { type: 'number', required: true },
+                    tags: {
+                        type: 'array',
+                        required: true,
+                        items: {
+                            type: 'object',
+                            additionalProperties: false,
+                            properties: {
+                                tag: { type: 'string', required: true },
+                                count: { type: 'number', required: true },
+                            },
+                        },
+                    },
+                },
+            },
+            render: (_args, value) => {
+                const v = value;
+                const lines = v.tags.map((t) => `- #${t.tag}（${t.count}）`);
+                return [{ type: 'text', text: `共 ${v.total} 个标签：\n${lines.length ? lines.join('\n') : '(无)'}` }];
+            },
+        },
+        async execute(args, exec) {
+            const a = args;
+            const root = await resolveVaultRoot(config, exec, args.vault);
+            const limit = Math.max(1, Math.min(a.limit ?? 200, 1000));
+            const bridge = await bridgeOrNull(config, root, exec.signal);
+            if (bridge) {
+                const res = await bridge.allTags({ folder: a.folder, ignoreDirs: config.ignoreDirs });
+                return { total: res.total, tags: res.tags.slice(0, limit) };
+            }
+            // 文件回退：扫描正文提取（与桥结果同构，无计数缓存）
+            let notes = await vaultNotes(fs, config, root, exec);
+            if (a.folder)
+                notes = notes.filter((n) => inFolder(n.path, a.folder));
+            const counts = new Map();
+            await mapLimit(notes, 8, async (note) => {
+                try {
+                    const body = await fs.readText(note.target, exec.signal);
+                    for (const t of extractTags(body))
+                        counts.set(t, (counts.get(t) ?? 0) + 1);
+                }
+                catch {
+                    // 读取失败跳过
+                }
+            });
+            const tags = [...counts.entries()]
+                .map(([tag, count]) => ({ tag, count }))
+                .sort((x, y) => x.tag.localeCompare(y.tag));
+            return { total: tags.length, tags: tags.slice(0, limit) };
+        },
+        presentCall: (args) => {
+            const a = args;
+            return { card: 'generic', title: a?.folder ? `列出 vault/${a.folder} 的标签` : '列出全库标签' };
+        },
+    }));
+    ctx.tools.register(defineTool({
+        name: 'vault_note_link',
+        description: '生成指向笔记的标准链接文本：桥模式下用 fileManager.generateMarkdownLink（遵循用户 useMarkdownLinks 设置，source 给定时生成相对它的 markdown 链接）；文件回退模式返回 [[vault相对路径]]。',
+        parameters: {
+            vault: { type: 'string', description: '可选：操作的目标 Obsidian 库（库名或绝对路径）；默认自动解析当前库。' },
+            path: { type: 'string', required: true, description: '目标笔记的 vault 相对路径，/ 分隔，可省略 .md 后缀。' },
+            source: { type: 'string', description: '可选：来源笔记的 vault 相对路径——生成相对它的 markdown 链接；省略时按根生成。' },
+        },
+        output: {
+            schema: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                    path: { type: 'string', required: true },
+                    link: { type: 'string', required: true },
+                    format: { type: 'string', required: true, enum: ['wikilink', 'markdown'] },
+                },
+            },
+            render: (_args, value) => {
+                const v = value;
+                return [{ type: 'text', text: `链接（${v.format}）：${v.link}` }];
+            },
+        },
+        async execute(args, exec) {
+            const a = args;
+            const root = await resolveVaultRoot(config, exec, args.vault);
+            const rel = noteRelPath(a.path);
+            const bridge = await bridgeOrNull(config, root, exec.signal);
+            if (bridge) {
+                const res = await bridge.noteLink(rel, a.source);
+                return { path: rel, link: res.link, format: res.format };
+            }
+            const link = `[[${rel.replace(/\.md$/, '')}]]`;
+            return { path: rel, link, format: 'wikilink' };
+        },
+        presentCall: (args) => ({ card: 'generic', title: `生成链接 ${args.path}` }),
     }));
 }

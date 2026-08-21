@@ -189,6 +189,160 @@ if (VAULT) {
   console.warn('\n[smoke] 未设置 SMOKE_VAULT，跳过真实 vault 只读测试；设置 SMOKE_VAULT=/path/to/vault 可启用')
 }
 
+// —— Obsidian API 桥集成：假桥服务器 + env 注入，验证工具桥优先路由 ——
+{
+  const { createServer } = await import('node:http')
+  const TOKEN = 'smoke-bridge-token'
+  const notes = new Map([
+    ['hello.md', '# hello\n标签 #foo\n'],
+    ['sub/x.md', '见 [[hello]]\n'],
+  ])
+  const readBody = (req) => new Promise((resolve) => {
+    let s = ''
+    req.on('data', (c) => { s += c })
+    req.on('end', () => resolve(s))
+  })
+  const server = createServer(async (req, res) => {
+    const url = new URL(req.url ?? '/', 'http://127.0.0.1')
+    const send = (data, status = 200) => {
+      res.writeHead(status, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify(data))
+    }
+    if ((req.headers.authorization ?? '') !== `Bearer ${TOKEN}`) {
+      return send({ error: { code: 'BRIDGE_UNAUTHORIZED', message: '无效 token' } }, 401)
+    }
+    const p = url.pathname
+    if (p === '/health') return send({ ok: true, vault: { name: 'Smoke', path: SCRATCH } })
+    if (p === '/v1/current') return send({ name: 'Smoke', path: SCRATCH, activeFile: 'hello.md', updatedAt: 1 })
+    if (p === '/v1/notes') {
+      const all = [...notes.entries()].map(([path, content]) => ({ path, size: content.length }))
+      return send({ total: all.length, notes: all })
+    }
+    if (p === '/v1/note') {
+      const rel = url.searchParams.get('path')
+      const content = notes.get(rel)
+      if (content === undefined) return send({ error: { code: 'VAULT_NOTE_NOT_FOUND', message: `笔记不存在：${rel}` } }, 404)
+      return send({ path: rel, content, size: content.length })
+    }
+    if (p === '/v1/write') {
+      const body = JSON.parse(await readBody(req))
+      if (body.op === 'append') {
+        const prev = notes.get(body.path) ?? ''
+        notes.set(body.path, prev + body.content)
+        return send({ path: body.path, operation: 'append', addedChars: body.content.length })
+      }
+      const existed = notes.has(body.path)
+      notes.set(body.path, body.content)
+      return send({ path: body.path, operation: existed ? 'update' : 'create' })
+    }
+    if (p === '/v1/edit') {
+      return send({ error: { code: 'FS_EDIT_NOT_FOUND', message: '未找到匹配文本（桥错误映射）' } }, 404)
+    }
+    if (p === '/v1/search') return send({ total: 1, hits: [{ path: 'hello.md', snippet: '桥检索命中' }] })
+    if (p === '/v1/metadata') return send({
+      path: url.searchParams.get('path'), frontmatter: { present: false, fields: [] },
+      tags: ['foo'], aliases: [], wikilinks: [], markdown: [], unresolved: 0,
+    })
+    if (p === '/v1/backlinks') return send({
+      total: 1, backlinks: [{ path: 'sub/x.md', snippet: '见 [[hello]]' }], target: url.searchParams.get('path'),
+    })
+    if (p === '/v1/folders') return send({ total: 1, folders: [{ path: '', notes: 2 }] })
+    if (p === '/v1/tags') return send({ total: 1, hits: [{ path: 'hello.md', tags: ['foo'] }] })
+    if (p === '/v1/frontmatter') return send({ path: url.searchParams.get('path'), present: false, valid: true, fields: [], issues: [] })
+    if (p === '/v1/trash') {
+      const body = JSON.parse(await readBody(req))
+      notes.delete(body.path)
+      return send({ path: body.path, trashed: true })
+    }
+    if (p === '/v1/open') {
+      const body = JSON.parse(await readBody(req))
+      return send({ path: body.path, opened: true })
+    }
+    if (p === '/v1/all-tags') return send({ total: 2, tags: [{ tag: 'foo', count: 2 }, { tag: 'bar', count: 1 }] })
+    if (p === '/v1/link') {
+      const body = JSON.parse(await readBody(req))
+      return send({ path: body.path, link: `[[${body.path.replace(/\.md$/, '')}]]`, format: 'wikilink' })
+    }
+    return send({ error: { code: 'BRIDGE_NOT_FOUND', message: '未知端点' } }, 404)
+  })
+  const port = await new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server.address().port)))
+  process.env.DSH_OBSIDIAN_BRIDGE_URL = `http://127.0.0.1:${port}`
+  process.env.DSH_OBSIDIAN_BRIDGE_TOKEN = TOKEN
+  const { resetBridgeCache } = await import('../lib/bridge.js')
+  resetBridgeCache()
+
+  const cfgB = Config({ vaultRoot: SCRATCH, ignoreDirs: [] })
+  const { tools: toolsB } = makeCtx(cfgB)
+  console.log('\n[桥] Obsidian API 桥集成（假桥 127.0.0.1:' + port + '，工具应桥优先）')
+  const cur = await call(toolsB, 'vault_current', {})
+  console.log('[桥] vault_current -> ' + cur.replace(/\n/g, ' | '))
+  const bridgeActive = cur.includes('桥')
+  const notesB = await call(toolsB, 'vault_list_notes', {})
+  console.log('[桥] vault_list_notes -> ' + notesB.split('\n')[0])
+  const notesViaBridge = notesB.includes('hello.md') && notesB.includes('sub/x.md')
+  const readB = await call(toolsB, 'vault_read_note', { path: 'hello' })
+  const readViaBridge = readB.includes('标签 #foo')
+  const searchB = await call(toolsB, 'vault_search', { query: '桥' })
+  const searchViaBridge = searchB.includes('桥检索命中')
+  const tagsB = await call(toolsB, 'vault_search_tags', { tag: 'foo' })
+  const tagsViaBridge = tagsB.includes('hello.md')
+  const writeB = await call(toolsB, 'vault_create_note', { path: 'bridge/written', content: '# 经桥写入\n' })
+  const writeViaBridge = writeB.includes('已新建') && notes.has('bridge/written.md')
+  const blB = await call(toolsB, 'vault_backlinks', { title: 'hello', path: 'hello' })
+  const blViaBridge = blB.includes('sub/x.md')
+  const metaB = await call(toolsB, 'vault_note_info', { path: 'hello' })
+  const metaViaBridge = metaB.includes('foo')
+  const delB = await call(toolsB, 'vault_delete_note', { path: 'sub/x' })
+  const delViaBridge = delB.includes('回收站') && !notes.has('sub/x.md')
+  const openB = await call(toolsB, 'vault_open_note', { path: 'hello' })
+  const openViaBridge = openB.includes('已在 Obsidian 中打开')
+  const allTagsB = await call(toolsB, 'vault_all_tags', {})
+  const allTagsViaBridge = allTagsB.includes('#foo') && allTagsB.includes('（2）')
+  const linkB = await call(toolsB, 'vault_note_link', { path: 'hello' })
+  const linkViaBridge = linkB.includes('[[hello]]')
+  console.log(`[桥] 路由断言: current=${bridgeActive} list=${notesViaBridge} read=${readViaBridge} search=${searchViaBridge} tags=${tagsViaBridge} write=${writeViaBridge} backlinks=${blViaBridge} info=${metaViaBridge} delete=${delViaBridge} open=${openViaBridge} all_tags=${allTagsViaBridge} link=${linkViaBridge}`)
+  try {
+    await call(toolsB, 'vault_edit_note', { path: 'hello', old_string: '不存在', new_string: 'x' })
+    console.log('[桥] ✗ 桥错误映射未生效')
+    process.exitCode = 1
+  } catch (e) {
+    const mapped = e.message.includes('未找到匹配文本')
+    console.log(`[桥] 桥错误映射（FS_EDIT_NOT_FOUND → VaultError）: ${mapped}`)
+    if (!mapped) process.exitCode = 1
+  }
+  if (!(bridgeActive && notesViaBridge && readViaBridge && searchViaBridge && tagsViaBridge && writeViaBridge && blViaBridge && metaViaBridge && delViaBridge && openViaBridge && allTagsViaBridge && linkViaBridge)) {
+    console.error('[桥] 桥集成断言失败')
+    process.exitCode = 1
+  }
+  // 清理：恢复 env 与健康缓存，后续写工具测试走文件模式
+  delete process.env.DSH_OBSIDIAN_BRIDGE_URL
+  delete process.env.DSH_OBSIDIAN_BRIDGE_TOKEN
+  resetBridgeCache()
+  await new Promise((resolve) => server.close(resolve))
+
+  // 文件回退断言：env 清理后，依赖桥的工具报错、可回退的走文件实现
+  const { tools: toolsF } = makeCtx(Config({ vaultRoot: SCRATCH, ignoreDirs: [] }))
+  console.log('\n[桥] 文件模式回退（env 已清理）')
+  try {
+    await call(toolsF, 'vault_delete_note', { path: 'hello' })
+    console.log('[桥] ✗ 无桥删除未被拒绝')
+    process.exitCode = 1
+  } catch (e) {
+    console.log(`[桥] 无桥删除被拒绝（VAULT_TRASH_UNAVAILABLE）: ${e.message.includes('回收站删除需要')}`)
+  }
+  try {
+    await call(toolsF, 'vault_open_note', { path: 'hello' })
+    console.log('[桥] ✗ 无桥打开未被拒绝')
+    process.exitCode = 1
+  } catch (e) {
+    console.log(`[桥] 无桥打开被拒绝（VAULT_OPEN_UNAVAILABLE）: ${e.message.includes('打开笔记需要 Obsidian')}`)
+  }
+  const linkF = await call(toolsF, 'vault_note_link', { path: 'demo/hello' })
+  console.log(`[桥] 文件回退链接: ${linkF.includes('[[demo/hello]]')}`)
+  const allTagsF = await call(toolsF, 'vault_all_tags', {})
+  console.log(`[桥] 文件回退全库标签（不崩、返回列表）: ${allTagsF.includes('共')}`)
+}
+
 // —— 写工具，作用于临时目录 ——
 const cfg2 = Config({ vaultRoot: SCRATCH, ignoreDirs: [] })
 const { tools: tools2 } = makeCtx(cfg2)

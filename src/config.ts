@@ -38,6 +38,11 @@ export interface VaultConfig {
    * symlinked entries pointing outside.
    */
   allowSymlinkEscape: boolean
+  /**
+   * Use the dsh-dock Obsidian API bridge when available (bridge-first, file
+   * fallback). Default `true`. Turn off to always read files directly.
+   */
+  bridge: boolean
 }
 
 /** The schemastery schema the loader validates the patch `config` against. */
@@ -51,4 +56,5 @@ export const Config = z.object({
   ignoreDirs: z.array(z.string()).default(['.obsidian', '.git', '.claudian', '.trash']),
   allowArbitraryRoots: z.boolean().default(false),
   allowSymlinkEscape: z.boolean().default(false),
+  bridge: z.boolean().default(true),
 })

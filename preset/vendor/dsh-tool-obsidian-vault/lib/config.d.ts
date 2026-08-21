@@ -37,6 +37,11 @@ export interface VaultConfig {
      * symlinked entries pointing outside.
      */
     allowSymlinkEscape: boolean;
+    /**
+     * Use the dsh-dock Obsidian API bridge when available (bridge-first, file
+     * fallback). Default `true`. Turn off to always read files directly.
+     */
+    bridge: boolean;
 }
 /** The schemastery schema the loader validates the patch `config` against. */
 export declare const Config: z<Schemastery.ObjectS<{
@@ -47,6 +52,7 @@ export declare const Config: z<Schemastery.ObjectS<{
     ignoreDirs: z<string[], string[]>;
     allowArbitraryRoots: z<boolean, boolean>;
     allowSymlinkEscape: z<boolean, boolean>;
+    bridge: z<boolean, boolean>;
 }>, Schemastery.ObjectT<{
     vaultRoot: z<string, string>;
     vaultRoots: z<string[], string[]>;
@@ -55,4 +61,5 @@ export declare const Config: z<Schemastery.ObjectS<{
     ignoreDirs: z<string[], string[]>;
     allowArbitraryRoots: z<boolean, boolean>;
     allowSymlinkEscape: z<boolean, boolean>;
+    bridge: z<boolean, boolean>;
 }>>;
