@@ -2,13 +2,13 @@
 
 > 给 DSH（DeepSeek Harness）的 Obsidian 库工具插件：20 个 `vault_*` 工具，让 Agent
 > 直接搜索、读写本地 Obsidian 笔记，支持反向链接、frontmatter 与安全重命名。
-> 附带一个**开箱即用**的 agent preset——复制目录即安装，无需构建、无需改路径。
+> 附带一个 **Obsidian 模式** agent preset——一条命令装完即用，无需构建、无需改路径。
 > 与 Obsidian 插件 [obsidian-dsh-dock](https://github.com/Elervi/obsidian-dsh-dock)
 > **珠联璧合**：它让 DSH 住进 Obsidian，本工具让 Agent 认识 Obsidian。
 
 ## ✨ 特性
 
-- 📦 **一条命令安装** — `dsh plugin --profile web add -w github:Elervi/dsh-tool-obsidian-vault`，重启即装好；或手动复制自包含 preset（构建产物 + 运行时依赖已打包），无 npm / 构建 / 路径配置
+- 📦 **一条命令安装** — `dsh plugin --profile web add -w github:Elervi/dsh-tool-obsidian-vault`，重启即装好（bundle 装进 profile，重启时把内置 preset 自安装为 Obsidian 模式）
 - 🗂️ **多库自动发现** — 读 Obsidian 全局注册表，自动解析当前库；dsh-dock per-vault 注入（`DSH_OBSIDIAN_VAULT_PATH`）优先于一切猜测
 - 🔌 **Obsidian API 桥（B1）** — dsh-dock 开着时工具**桥优先**：frontmatter / 出链 / 反向链接 / 标签 / 重命名引用更新全部换成 Obsidian 官方解析（metadataCache / fileManager），写后 UI 与索引即时刷新；桥不可用自动回退文件直读（`ctx.fs`），CLI 直跑不退化
 - 🔍 **20 个 vault 工具** — 搜索 / 读写 / 反链 / frontmatter / 安全重命名 / 回收站删除 / 打开笔记 / 全库标签 / 生成链接
@@ -42,6 +42,11 @@ workspace 根；若你的 pnpm 已配置 `ignore-workspace-root-check`，可省�
 `~/.dsh/.agent-presets/obsidian`）。
 
 **手动安装**（任何 DSH 版本 / 非 web profile 通用）：
+
+> ⚠️ 前置：`dsh-tool-obsidian-vault` bundle 必须先装进目标 profile 的
+> node_modules（`dsh plugin --profile <name> add ...` 或
+> `npm/pnpm install dsh-tool-obsidian-vault@>=0.6.1`）——预设按裸包名挂载插件，
+> 解析自宿主核心；bundle 缺失时「Obsidian 模式」会话会因找不到插件而无法启动。
 
 ```sh
 git clone git@github.com:Elervi/dsh-tool-obsidian-vault.git
@@ -134,10 +139,11 @@ HTTP 桥（`DSH_OBSIDIAN_BRIDGE_URL/TOKEN` 经 env 与 `~/.dsh/current-vault.jso
 **fs 语义失败复用宿主 `FsErrorCode`**（`FS_STALE_VERSION` / `FS_NOT_OBSERVED` /
 `FS_AMBIGUOUS_EDIT` / `FS_EDIT_NOT_FOUND` / `FS_IO_ERROR` …），不重复造码。
 
-> ⚠️ **部署差异**：`ToolFailure.info` 的提取依赖「工具的 `@deepseek-ai/dsh-llm` 与宿主
-> 是同一模块实例」。仓库开发环境（node_modules 软链到宿主）成立；`presets/obsidian/` 自包含拷贝
-> 是独立实例，`info` 不会出现——但模型可见的 `message`（含恢复指令）两条路径完全一致，
-> 无功能回退。
+> ✅ **部署说明**：`ToolFailure.info` 的提取依赖「工具的 `@deepseek-ai/dsh-llm` 与宿主
+> 是同一模块实例」。v0.6.1 起 preset 用**裸包名**挂载插件（解析自 profile 的
+> node_modules），插件与宿主共用同一份核心，`info` 正常出现。此前 v0.6.0 的
+> `presets/obsidian/` 自包含拷贝（`vendor/`）是独立实例，`info` 不会出现——该设计
+> 已废弃并移除。
 
 ## 🔧 开发者 / 深度定制
 
@@ -148,39 +154,30 @@ npm install        # 依赖说明见下
 npm run build      # tsc → lib/
 ```
 
-在 preset 的 `agent.cordis.yml` 里挂载：
+在 preset 的 `agent.cordis.yml` 里挂载（裸包名，解析自宿主核心）：
 
 ```yaml
 - id: tool-obsidian-vault
-  name: '/绝对/路径/dsh-tool-obsidian-vault/lib/index.js'
+  name: 'dsh-tool-obsidian-vault'
   config:
     maxResults: 20
     ignoreDirs: ['.obsidian', '.git', '.claudian', '.trash']
 ```
 
-> ⚠️ **依赖有坑**：运行时依赖是 rc 版（`@deepseek-ai/dsh-tools@0.1.0-rc.6`），
-> peer 版本互相钳制，直接 `npm install` 会 ERESOLVE 失败。推荐从 DSH 安装目录
-> 软链同版本副本（`typescript` 正常安装）：
->
-> ```sh
-> DSH_PREFIX="$(npm root -g)/@deepseek-ai/dsh"
-> for p in dsh-tools cordis dsh-fs dsh-system-prompt dsh-llm; do
->   ln -sfn "$DSH_PREFIX/node_modules/@deepseek-ai/$p" "node_modules/@deepseek-ai/$p"
-> done
-> ln -sfn "$DSH_PREFIX/node_modules/schemastery" node_modules/schemastery
-> ```
->
-> 改 `src/` 后重新 `npm run build`；想省事直接用 `presets/obsidian/` 的自包含版本即可。
+> 依赖说明：运行时依赖全部声明为 peer（`@deepseek-ai/dsh-tools` / `dsh-llm` /
+> `cordis` / `schemastery`，由宿主 profile 提供，插件与宿主共用同一份模块实例）；
+> devDependencies 与 peer 范围已对齐（0.1.1-rc.2），`npm install` 即可，无需任何软链。
+> 改 `src/` 后重新 `npm run build`。
 > 本仓库同时是 DSH 插件开发方法示例（`src/tools.ts` 工具定义、`src/vault.ts` 扫描逻辑）。
 
 ### 常见问题
 
 | 现象 | 解决 |
 | --- | --- |
-| 工具不出现 | 检查挂载路径 / `presets/obsidian/` 目录完整性，重启 DSH |
+| 工具不出现 | 确认 bundle 已装进 profile（`dsh plugin --profile web ls`）；检查 `presets/obsidian/` 目录完整性，重启 DSH |
 | `vault` 传绝对路径被拒 | 加入 `vaultRoots`，或 `allowArbitraryRoots: true` |
 | 符号链接目录里的笔记搜不到 | 配置 `allowSymlinkEscape: true` |
-| `Cannot find module lib/index.js` | 改过 `src/` 需重新构建；自包含 preset 用户需替换 `presets/obsidian/vendor` 或整体重装 |
+| `Cannot find module dsh-tool-obsidian-vault` | 「Obsidian 模式」需要 bundle 先装入 profile：`dsh plugin --profile web add -w github:Elervi/dsh-tool-obsidian-vault` 后重启 |
 | 面板里 `vault_*` 认不到当前库 | dock 需为 per-vault 模式（注入 `DSH_OBSIDIAN_VAULT_PATH`）；shared 模式退回「最近活跃库 / 工作目录」解析 |
 | 桥没生效（还在文件直读） | ① dock 设置「启用 API 桥」是否打开；② Obsidian 是否在运行；③ 桥服务的是不是当前库（`vault_current` 判定依据会显示「桥」）；④ 配置 `bridge: false` 会强制关闭 |
 | 桥模式下写入后元数据略旧 | `metadataCache` 异步索引刚写入的文件，桥读取优先用 `cachedRead`；极端场景重试一次即可 |
@@ -189,6 +186,7 @@ npm run build      # tsc → lib/
 
 | 日期 | 更新 |
 | --- | --- |
+| 2026-08-23 | **消除双包危害（v0.6.1）**：preset 改用**裸包名**挂载插件（`name: 'dsh-tool-obsidian-vault'`），移除 `presets/obsidian/vendor/` 自包含拷贝——插件与宿主共用同一份 `@deepseek-ai/*` 模块实例，`VaultError` 的 `instanceof HarnessError` 成立，`ToolFailure.info` 结构化错误码恢复；依赖声明对齐（运行时依赖全部为 peer：cordis/dsh-tools/dsh-llm/schemastery；devDependencies 升到 0.1.1-rc.2 与 peer 一致，`npm install` 不再 ERESOLVE）；重建发布物（tarball + preset zip） |
 | 2026-08-21 | **一条命令安装（v0.6.0）**：包声明 `dsh.bundle` 成为 profile bundle，`dsh plugin --profile web add -w github:Elervi/dsh-tool-obsidian-vault` 装完重启即自动把 `presets/obsidian/` 自安装为 agent preset（`~/.dsh/.agent-presets/obsidian`，幂等不覆盖）；新增 `installPreset`/`registerTools` 配置与安装器（`src/install.ts`，`$DSH_HOME` 优先、`~/.dsh` 兜底）；`preset/` 更名为 `presets/obsidian/`（目录名即预设 id） |
 | 2026-08-21 | **API 全覆盖（v0.5.0 扩展）**：补齐 4 个工具使核心 Obsidian API 全覆盖——`vault_delete_note`（`fileManager.trashFile` 回收站语义，旧版降级 `vault.trash`）、`vault_open_note`（`workspace.openLinkText`）、`vault_all_tags`（`metadataCache.getAllTags` 全库标签聚合）、`vault_note_link`（`fileManager.generateMarkdownLink` 按用户链接设置）；错误码新增 `VAULT_TRASH_UNAVAILABLE`/`VAULT_OPEN_UNAVAILABLE`；桥端点 `/v1/{trash,open,all-tags,link}`；冒烟与 vendor 同步；工具总数 16 → 20 |
 | 2026-08-21 | **Obsidian API 桥（B1，v0.5.0）**：dsh-dock 起 127.0.0.1 token 鉴权 HTTP 桥，工具侧「桥优先、文件回退」——frontmatter/出链/嵌入/标签/别名/反向链接/未解析链接换用 metadataCache 官方解析，frontmatter 修改走 fileManager.processFrontMatter，重命名走 fileManager.renameFile（按用户「自动更新内部链接」设置）；桥经 `DSH_OBSIDIAN_BRIDGE_URL/TOKEN` env + `~/.dsh/current-vault.json` 标记文件双通道发现（per-vault env 权威、shared 多窗口按标记文件匹配）；配置 `bridge: false` 可强制文件模式；新增 `src/bridge.ts` 客户端与 `scripts/smoke.mjs` 假桥集成冒烟；vendor 同步 |

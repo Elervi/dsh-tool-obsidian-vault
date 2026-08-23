@@ -68,7 +68,7 @@ export async function installPreset(options: InstallPresetOptions = {}): Promise
     return { installed: false, target }
   }
 
-  // 目标已存在：绝不覆盖 —— 用户可能自定义过 agent.cordis.yml / skills / vendor。
+  // 目标已存在：绝不覆盖 —— 用户可能自定义过 agent.cordis.yml / skills。
   try {
     await stat(target)
     log(`agent-preset "${id}" already installed at ${target} — keeping it (install never overwrites user edits)`)

@@ -1,23 +1,32 @@
-# The `obsidian` agent preset (self-contained distribution copy): the standard
-# coding agent, specialized for a local Obsidian vault.
+# The `obsidian` agent preset: the standard coding agent, specialized for a
+# local Obsidian vault.
 #
 # This directory IS the preset: copy it into ~/.dsh/.agent-presets/<id>/ and
-# restart DSH. The folder name becomes the preset id shown in the new-session
-# picker. Install steps and customization notes: see README.md in this folder.
+# restart DSH (the profile bundle `dsh-tool-obsidian-vault` must be installed
+# first — see README.md). The folder name becomes the preset id shown in the
+# new-session picker. Install steps and customization notes: see README.md.
 #
 # Compared to the shipped `standard` preset, three things change:
 #   1. persona             — an Obsidian note-taking assistant, vault-root aware
-#   2. tool-obsidian-vault — mounts the vendored plugin dsh-tool-obsidian-vault
-#      (vendor/dsh-tool-obsidian-vault, built lib/ + runtime node_modules), so
-#      only sessions on THIS preset can call the vault tools
+#   2. tool-obsidian-vault — mounts the dsh-tool-obsidian-vault bundle by bare
+#      package name, so only sessions on THIS preset can call the vault tools,
+#      and the plugin resolves @deepseek-ai/* from the profile's node_modules —
+#      the SAME module instances the host core uses (no vendored duplicate
+#      copy: VaultError's `instanceof HarnessError` holds, so ToolFailure.info
+#      carries the structured error codes)
 #   3. skill-filesystem    — additionally scans this preset's own skills/
 #      directory for preset-local skills (e.g. obsidian-conventions)
 #
-# The plugin row uses a RELATIVE specifier (./vendor/...): the loader resolves
-# relative names against this preset's own directory, so the whole folder is
-# self-contained and travels anywhere — no absolute paths, nothing to edit
-# after install. Keep the vendor/ subfolder complete; refreshing it is
-# documented in vendor/dsh-tool-obsidian-vault/VENDOR.md.
+# The plugin row uses a BARE specifier (`dsh-tool-obsidian-vault`), NOT a
+# relative `./vendor/...` path: the preset loader resolves relative names
+# against the preset's own directory (which used to pull in a vendored copy of
+# the plugin and its entire @deepseek-ai runtime — a second, independent core
+# stack whose classes broke `instanceof HarnessError` identity with the host),
+# while bare names resolve against the harness's node_modules — the profile
+# copy installed by `dsh plugin add`. This is what makes the plugin share the
+# host's core. The bundle must therefore be installed BEFORE this preset is
+# used; the self-installing `installPreset` flow handles that ordering for the
+# one-command install path.
 #
 # This file is an AGENT-PLANE composition: every tool and prompt section it
 # registers belongs to sessions that name this preset. The host composition
@@ -62,9 +71,9 @@
   config:
     maxBytes: 65536
 
-# ── vault tools (vendored tree-out plugin) ──────────────────────────────────
+# ── vault tools (profile bundle plugin) ─────────────────────────────────────
 
-# Mounts the vendored dsh-tool-obsidian-vault. The plugin registers 16
+# Mounts the dsh-tool-obsidian-vault profile bundle. The plugin registers 16
 # model-callable tools — read: vault_list_vaults / vault_current /
 # vault_list_notes / vault_list_folders / vault_search / vault_search_tags /
 # vault_read_note / vault_note_info / vault_backlinks / vault_frontmatter /
@@ -75,7 +84,7 @@
 # calling session's cwd. Tune the config below (maxResults / ignoreDirs /
 # vaultRoot / allowArbitraryRoots / ...) as you like.
 - id: tool-obsidian-vault
-  name: './vendor/dsh-tool-obsidian-vault/lib/index.js'
+  name: 'dsh-tool-obsidian-vault'
   config:
     maxResults: 20
     ignoreDirs: ['.obsidian', '.git', '.claudian', '.trash']

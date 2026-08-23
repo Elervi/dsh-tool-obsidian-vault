@@ -16,12 +16,11 @@ jobs:
           node-version: 22
 
       - name: Install dependencies
-        # --legacy-peer-deps: the @deepseek-ai peer chain (dsh-agent/llm/scope/...)
-        # is provided at runtime by the host dsh profile, not by npm. The rc
-        # tags on npm drift ahead of 0.1.0-rc.6 (npm resolves ^0.1.0-rc.6 to rc.7,
-        # whose transitive peers conflict with our pinned rc.6), so we skip
-        # peer resolution and only materialize the compile-time deps.
-        run: npm install --legacy-peer-deps
+        # devDependencies 已与 peerDependencies 对齐（0.1.1-rc.2 核心链 +
+        # cordis 4.0.1 + schemastery 3.18.1），npm install 干净通过，无需
+        # --legacy-peer-deps；运行时依赖（dsh-tools/dsh-llm/cordis/schemastery）
+        # 由宿主 profile 提供。
+        run: npm install
 
       - name: Build
         run: npm run build
