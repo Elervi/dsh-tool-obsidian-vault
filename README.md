@@ -178,6 +178,7 @@ npm run build      # tsc → lib/
 | `vault` 传绝对路径被拒 | 加入 `vaultRoots`，或 `allowArbitraryRoots: true` |
 | 符号链接目录里的笔记搜不到 | 配置 `allowSymlinkEscape: true` |
 | `Cannot find module dsh-tool-obsidian-vault` | 「Obsidian 模式」需要 bundle 先装入 profile：`dsh plugin --profile web add -w github:Elervi/dsh-tool-obsidian-vault` 后重启 |
+| `ToolFailure.info` 没有结构化错误码 / DSH 升级后 `pnpm update` 报一堆 unmet peer | 双包危害或 profile 锁文件过期，见 [`docs/troubleshooting-dual-package-and-stale-lockfile.md`](docs/troubleshooting-dual-package-and-stale-lockfile.md) |
 | 面板里 `vault_*` 认不到当前库 | dock 需为 per-vault 模式（注入 `DSH_OBSIDIAN_VAULT_PATH`）；shared 模式退回「最近活跃库 / 工作目录」解析 |
 | 桥没生效（还在文件直读） | ① dock 设置「启用 API 桥」是否打开；② Obsidian 是否在运行；③ 桥服务的是不是当前库（`vault_current` 判定依据会显示「桥」）；④ 配置 `bridge: false` 会强制关闭 |
 | 桥模式下写入后元数据略旧 | `metadataCache` 异步索引刚写入的文件，桥读取优先用 `cachedRead`；极端场景重试一次即可 |
