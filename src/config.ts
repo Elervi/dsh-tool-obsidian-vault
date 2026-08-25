@@ -50,11 +50,22 @@ export interface VaultConfig {
    * This is the one-command install path: the package is added as a profile
    * bundle (`dsh plugin --profile web add github:...`), this flag runs the
    * copy, and the preset shows up in the new-session picker on next boot.
-   * The copy is idempotent and NEVER overwrites an existing preset — user
-   * edits under `~/.dsh/.agent-presets/obsidian/` stay untouched.
-   * Default `false` (the preset's own agent-plane mount never sets it).
+   * The copy is idempotent and, in `'merge'` mode (default), syncs to the
+   * bundled snapshot on every upgrade while keeping user edits — see
+   * `presetMode`. Default `false` (the preset's own agent-plane mount never
+   * sets it).
    */
   installPreset: boolean
+  /**
+   * Behavior when `~/.dsh/.agent-presets/obsidian` already exists:
+   *   - `'merge'`     (default) 3-way sync against a baseline manifest: update
+   *     files the user never touched, keep user-edited and user-added files,
+   *     add new plugin files, drop plugin-removed files. Fixes "upgrading the
+   *     plugin leaves the preset at the old snapshot".
+   *   - `'preserve'`  never overwrite an existing preset (historical behavior).
+   *   - `'overwrite'` replace the whole preset with the bundled snapshot.
+   */
+  presetMode: 'merge' | 'preserve' | 'overwrite'
   /**
    * Whether this mount registers the `vault_*` tools and the
    * `tools:obsidian-vault` prompt section. The preset's agent-plane row
@@ -77,5 +88,6 @@ export const Config = z.object({
   allowSymlinkEscape: z.boolean().default(false),
   bridge: z.boolean().default(true),
   installPreset: z.boolean().default(false),
+  presetMode: z.string().pattern(/^(merge|preserve|overwrite)$/).default('merge'),
   registerTools: z.boolean().default(true),
 })

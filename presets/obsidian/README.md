@@ -56,8 +56,11 @@ dsh plugin --profile web add -w github:Elervi/dsh-tool-obsidian-vault
 bundle 与 preset 分开升级：
 
 - **bundle**：`dsh plugin --profile web update dsh-tool-obsidian-vault`，重启后新会话生效。
-- **本 preset 目录**：整体覆盖 `~/.dsh/.agent-presets/obsidian/`（用新版本目录替换，
-  已自定义过 `agent.cordis.yml` / `preset.yml` / `skills/` 的请先备份再手动合并）。
+- **preset 目录**：`v0.6.2+` 起由插件在下次启动时**自动同步**（`installPreset` 的
+  `mode: 'merge'` 默认）：你改过的文件保留，没动过的更新到新版，插件新增/移除的
+  文件跟随；首装会写基线清单（`.dsh-preset-manifest.json`）。旧版/手工放下的目录
+  无基线，会先按“保留”落地清单——想让这类目录彻底跟上新版，删除
+  `~/.dsh/.agent-presets/obsidian/` 后重启一次即可。
 
 ## 说明
 

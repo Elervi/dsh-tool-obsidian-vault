@@ -1,5 +1,6 @@
-// 安装器单元测试：installPreset / resolveDshHome 的幂等性、不覆盖、源缺失、
-// DSH_HOME 解析。全部在系统临时目录里执行，不触碰真实的 ~/.dsh。
+// 安装器单元测试：installPreset / resolveDshHome 的安装、升级同步（merge）、
+// 保留用户改动、增删文件跟随、preserve / overwrite、历史遗留、自定义 id。
+// 全部在系统临时目录里执行，不触碰真实的 ~/.dsh。
 import { mkdtemp, mkdir, writeFile, readFile, rm, stat } from 'node:fs/promises'
 import path from 'node:path'
 import { tmpdir } from 'node:os'
@@ -26,74 +27,133 @@ const logs = []
   const home = path.join(SCRATCH, 'home-missing-source')
   const r = await installPreset({ home, source: path.join(SCRATCH, 'no-such-preset'), log: (l) => logs.push(l) })
   check('源缺失 → installed=false', r.installed === false)
+  check('源缺失 synced=skipped', r.synced === 'skipped')
   check('源缺失不创建目标', !(await pathExists(path.join(home, '.agent-presets', 'obsidian'))))
 }
 
-// —— 3. 正常安装 ——
+// —— 3. 正常首装 + 写基线清单 ——
 {
   const home = path.join(SCRATCH, 'home-install')
-  const source = await makeFakePreset('preset-a')
+  const source = await makeFakeSource({ 'agent.cordis.yml': '# A\n- id: tool-obsidian-vault\n', 'preset.yml': 'name: A\n' })
   const r = await installPreset({ home, source, log: (l) => logs.push(l) })
-  check('安装成功 → installed=true', r.installed === true)
+  check('首装 → installed=true', r.installed === true)
+  check('首装 synced=installed', r.synced === 'installed')
   check('落点正确', r.target === path.join(home, '.agent-presets', 'obsidian'))
-  const composed = await readFile(path.join(home, '.agent-presets', 'obsidian', 'agent.cordis.yml'), 'utf8')
-  check('内容复制完整', composed.includes('tool-obsidian-vault'))
-  const nested = await readFile(path.join(home, '.agent-presets', 'obsidian', 'vendor', 'pkg', 'lib', 'index.js'), 'utf8')
-  check('嵌套目录（vendor）复制完整', nested.includes('module'))
+  check('内容复制完整', (await readFile(path.join(home, '.agent-presets', 'obsidian', 'agent.cordis.yml'), 'utf8')).includes('tool-obsidian-vault'))
+  check('已写基线清单', await pathExists(path.join(home, '.agent-presets', 'obsidian', '.dsh-preset-manifest.json')))
 }
 
-// —— 4. 幂等：已存在则跳过 ——
+// —— 4. 升级同步：未改动文件更新到新版 + 新增文件加入（本次要修的坑）——
 {
-  const home = path.join(SCRATCH, 'home-install')
-  const source = await makeFakePreset('preset-b') // 与上次不同的源内容
-  const before = await readFile(path.join(home, '.agent-presets', 'obsidian', 'agent.cordis.yml'), 'utf8')
-  const r = await installPreset({ home, source, log: (l) => logs.push(l) })
-  check('已存在 → installed=false', r.installed === false)
-  const after = await readFile(path.join(home, '.agent-presets', 'obsidian', 'agent.cordis.yml'), 'utf8')
-  check('已存在时不覆盖（内容保持首次安装）', before === after && after.includes('preset-a'))
+  const home = path.join(SCRATCH, 'home-merge-update')
+  const sourceA = await makeFakeSource({ 'agent.cordis.yml': '# A\n', 'preset.yml': 'name: A\n' })
+  await installPreset({ home, source: sourceA })
+  // 用户没动，插件新版本改了内容并新增一个文件
+  const sourceB = await makeFakeSource({ 'agent.cordis.yml': '# B (new)\n', 'preset.yml': 'name: B\n', 'skills/new.md': 'hello\n' })
+  const r = await installPreset({ home, source: sourceB, log: (l) => logs.push(l) })
+  check('merge → installed=true', r.installed === true)
+  check('merge synced=merged', r.synced === 'merged')
+  check('未改动文件已更新到最新版', (await readFile(path.join(home, '.agent-presets', 'obsidian', 'agent.cordis.yml'), 'utf8')) === '# B (new)\n')
+  check('插件新增文件已加入', (await readFile(path.join(home, '.agent-presets', 'obsidian', 'skills', 'new.md'), 'utf8')) === 'hello\n')
+  check('updated>=1', (r.updated ?? 0) >= 1, `updated=${r.updated}`)
+  check('added>=1', (r.added ?? 0) >= 1, `added=${r.added}`)
 }
 
-// —— 5. 用户自定义不被覆盖 ——
+// —— 5. 升级同步：用户改过的文件保留 ——
 {
-  const home = path.join(SCRATCH, 'home-custom')
-  const source = await makeFakePreset('preset-c')
-  await installPreset({ home, source })
+  const home = path.join(SCRATCH, 'home-merge-preserve')
+  const sourceA = await makeFakeSource({ 'agent.cordis.yml': '# A\n', 'preset.yml': 'name: A\n' })
+  await installPreset({ home, source: sourceA })
   await writeFile(path.join(home, '.agent-presets', 'obsidian', 'agent.cordis.yml'), '# user customized\n', 'utf8')
-  await installPreset({ home, source })
-  const now = await readFile(path.join(home, '.agent-presets', 'obsidian', 'agent.cordis.yml'), 'utf8')
-  check('用户修改保持原样', now === '# user customized\n')
+  const sourceB = await makeFakeSource({ 'agent.cordis.yml': '# B (new)\n', 'preset.yml': 'name: B\n' })
+  const r = await installPreset({ home, source: sourceB, log: (l) => logs.push(l) })
+  check('用户改动保留原样', (await readFile(path.join(home, '.agent-presets', 'obsidian', 'agent.cordis.yml'), 'utf8')) === '# user customized\n')
+  check('未改动文件（preset.yml）仍更新', (await readFile(path.join(home, '.agent-presets', 'obsidian', 'preset.yml'), 'utf8')) === 'name: B\n')
+  check('preserved>=1', (r.preserved ?? 0) >= 1, `preserved=${r.preserved}`)
 }
 
-// —— 6. 并发竞争（目标目录已在拷贝间隙出现）→ 视为已安装 ——
+// —— 6. 升级同步：用户新增的文件保留 ——
 {
-  const home = path.join(SCRATCH, 'home-race')
-  const source = await makeFakePreset('preset-d')
-  await mkdir(path.join(home, '.agent-presets', 'obsidian'), { recursive: true })
-  await writeFile(path.join(home, '.agent-presets', 'obsidian', 'pre-existing.txt'), 'x', 'utf8')
-  const r = await installPreset({ home, source, log: (l) => logs.push(l) })
-  check('EEXIST 竞争 → installed=false 且不报错', r.installed === false)
-  const keep = await readFile(path.join(home, '.agent-presets', 'obsidian', 'pre-existing.txt'), 'utf8')
-  check('竞争时已有文件保留', keep === 'x')
+  const home = path.join(SCRATCH, 'home-merge-useradd')
+  const sourceA = await makeFakeSource({ 'agent.cordis.yml': '# A\n', 'preset.yml': 'name: A\n' })
+  await installPreset({ home, source: sourceA })
+  await mkdir(path.join(home, '.agent-presets', 'obsidian', 'skills', 'mine'), { recursive: true })
+  await writeFile(path.join(home, '.agent-presets', 'obsidian', 'skills', 'mine', 'SKILL.md'), 'my skill\n', 'utf8')
+  const sourceB = await makeFakeSource({ 'agent.cordis.yml': '# B\n', 'preset.yml': 'name: B\n' })
+  await installPreset({ home, source: sourceB, log: (l) => logs.push(l) })
+  check('用户新增文件保留', (await readFile(path.join(home, '.agent-presets', 'obsidian', 'skills', 'mine', 'SKILL.md'), 'utf8')) === 'my skill\n')
 }
 
-// —— 7. 自定义 id ——
+// —— 7. 升级同步：插件移除且用户没改过 → 跟随删除 ——
+{
+  const home = path.join(SCRATCH, 'home-merge-remove')
+  const sourceA = await makeFakeSource({ 'agent.cordis.yml': '# A\n', 'preset.yml': 'name: A\n', 'gone.txt': 'bye\n' })
+  await installPreset({ home, source: sourceA })
+  check('gone.txt 首装已在', await pathExists(path.join(home, '.agent-presets', 'obsidian', 'gone.txt')))
+  const sourceB = await makeFakeSource({ 'agent.cordis.yml': '# B\n', 'preset.yml': 'name: B\n' })
+  const r = await installPreset({ home, source: sourceB, log: (l) => logs.push(l) })
+  check('插件移除且未改动 → 删除', !(await pathExists(path.join(home, '.agent-presets', 'obsidian', 'gone.txt'))))
+  check('removed>=1', (r.removed ?? 0) >= 1, `removed=${r.removed}`)
+}
+
+// —— 8. preserve 模式：永不覆盖 ——
+{
+  const home = path.join(SCRATCH, 'home-preserve')
+  const sourceA = await makeFakeSource({ 'agent.cordis.yml': '# A\n', 'preset.yml': 'name: A\n' })
+  await installPreset({ home, source: sourceA })
+  await writeFile(path.join(home, '.agent-presets', 'obsidian', 'agent.cordis.yml'), '# user\n', 'utf8')
+  const sourceB = await makeFakeSource({ 'agent.cordis.yml': '# B\n', 'preset.yml': 'name: B\n' })
+  const r = await installPreset({ home, source: sourceB, mode: 'preserve', log: (l) => logs.push(l) })
+  check('preserve → installed=false', r.installed === false)
+  check('preserve synced=preserved', r.synced === 'preserved')
+  check('preserve 不改任何文件', (await readFile(path.join(home, '.agent-presets', 'obsidian', 'agent.cordis.yml'), 'utf8')) === '# user\n'
+    && (await readFile(path.join(home, '.agent-presets', 'obsidian', 'preset.yml'), 'utf8')) === 'name: A\n')
+}
+
+// —— 9. overwrite 模式：整体替换（丢弃用户改动）——
+{
+  const home = path.join(SCRATCH, 'home-overwrite')
+  const sourceA = await makeFakeSource({ 'agent.cordis.yml': '# A\n', 'preset.yml': 'name: A\n' })
+  await installPreset({ home, source: sourceA })
+  await writeFile(path.join(home, '.agent-presets', 'obsidian', 'agent.cordis.yml'), '# user\n', 'utf8')
+  const sourceB = await makeFakeSource({ 'agent.cordis.yml': '# B\n', 'preset.yml': 'name: B\n' })
+  const r = await installPreset({ home, source: sourceB, mode: 'overwrite', log: (l) => logs.push(l) })
+  check('overwrite → installed=true', r.installed === true)
+  check('overwrite synced=overwritten', r.synced === 'overwritten')
+  check('overwrite 使用新版', (await readFile(path.join(home, '.agent-presets', 'obsidian', 'agent.cordis.yml'), 'utf8')) === '# B\n')
+}
+
+// —— 10. 历史遗留（无清单）：保留现有文件 + 落地清单 ——
+{
+  const home = path.join(SCRATCH, 'home-legacy')
+  const target = path.join(home, '.agent-presets', 'obsidian')
+  await mkdir(target, { recursive: true })
+  await writeFile(path.join(target, 'agent.cordis.yml'), '# legacy user copy\n', 'utf8')
+  const source = await makeFakeSource({ 'agent.cordis.yml': '# new\n', 'preset.yml': 'name: new\n' })
+  const r = await installPreset({ home, source, log: (l) => logs.push(l) })
+  check('legacy merge → installed=true', r.installed === true)
+  check('legacy 保留现有文件', (await readFile(path.join(target, 'agent.cordis.yml'), 'utf8')) === '# legacy user copy\n')
+  check('legacy 落地清单（下次可同步）', await pathExists(path.join(target, '.dsh-preset-manifest.json')))
+}
+
+// —— 11. 自定义 id ——
 {
   const home = path.join(SCRATCH, 'home-custom-id')
-  const source = await makeFakePreset('preset-e')
+  const source = await makeFakeSource({ 'agent.cordis.yml': '# A\n', 'preset.yml': 'name: A\n' })
   const r = await installPreset({ home, source, id: 'obsidian-lite' })
-  check('自定义 id 生效', r.installed === true && (await pathExists(path.join(home, '.agent-presets', 'obsidian-lite'))))
+  check('自定义 id 生效', r.installed === true && r.synced === 'installed' && (await pathExists(path.join(home, '.agent-presets', 'obsidian-lite'))))
 }
 
 console.log(`\n${failures === 0 ? '✅' : '❌'} install tests: ${failures} failure(s)`)
 
 // —— 工具函数 ——
-async function makeFakePreset(marker) {
-  const dir = path.join(SCRATCH, `src-${marker}`)
-  await mkdir(path.join(dir, 'vendor', 'pkg', 'lib'), { recursive: true })
-  await writeFile(path.join(dir, 'agent.cordis.yml'), `# ${marker}\n- id: tool-obsidian-vault\n  name: './vendor/pkg/lib/index.js'\n`, 'utf8')
-  await writeFile(path.join(dir, 'preset.yml'), `name: ${marker}\n`, 'utf8')
-  await writeFile(path.join(dir, 'vendor', 'pkg', 'lib', 'index.js'), '// module\n', 'utf8')
-  await writeFile(path.join(dir, 'vendor', 'pkg', 'package.json'), '{"name":"pkg"}\n', 'utf8')
+async function makeFakeSource(files) {
+  const dir = path.join(SCRATCH, `src-${Math.random().toString(36).slice(2)}`)
+  for (const [rel, content] of Object.entries(files)) {
+    const p = path.join(dir, rel)
+    await mkdir(path.dirname(p), { recursive: true })
+    await writeFile(p, content, 'utf8')
+  }
   return dir
 }
 

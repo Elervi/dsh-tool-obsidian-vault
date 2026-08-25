@@ -36,8 +36,11 @@ workspace 根；若你的 pnpm 已配置 `ignore-workspace-root-check`，可省�
 3. 会话里出现 `vault_list_vaults` / `vault_search` 等 `vault_*` 工具即成功 ✅
 
 **更新**：`dsh plugin --profile web update dsh-tool-obsidian-vault`（只更新包；
-已装好的预设副本不会被覆盖，需要最新快照时删除 `~/.dsh/.agent-presets/obsidian`
-后重启，或按 [`presets/obsidian/README.md`](presets/obsidian/README.md) 手动覆盖）。
+预设副本会在下次启动时按 `presetMode`（默认 `merge`）**自动同步到新版快照**：
+你改过的文件保留、没动过的文件更新、插件新增/移除的文件跟随，见 `src/install.ts`。
+若你的旧预设由旧版插件或手工放下、无基线清单会先按“保留”落地清单，想彻底跟上
+新版可删除 `~/.dsh/.agent-presets/obsidian` 后重启一次，或按
+[`presets/obsidian/README.md`](presets/obsidian/README.md) 手动覆盖）。
 **卸载**：`dsh plugin --profile web remove dsh-tool-obsidian-vault`（可再删
 `~/.dsh/.agent-presets/obsidian`）。
 ## 🤝 与 obsidian-dsh-dock 珠联璧合

@@ -34,7 +34,7 @@ export { Config }
 
 export async function apply(ctx: Context, config: VaultConfig): Promise<void> {
   if (config.installPreset) {
-    await installPreset({ log: (line) => ctx.logger.info(line) })
+    await installPreset({ log: (line) => ctx.logger.info(line), mode: config.presetMode })
   }
   if (!config.registerTools) return
   const text = await buildPromptSection()

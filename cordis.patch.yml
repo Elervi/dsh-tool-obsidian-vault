@@ -3,8 +3,11 @@
 # 安装：
 #   dsh plugin --profile web add github:Elervi/dsh-tool-obsidian-vault
 # 重启 dsh web 后，本层把包内置的 presets/obsidian/ 自安装为 agent preset
-# （落点 ~/.dsh/.agent-presets/obsidian/，与手工 cp 完全一致；幂等，已存在则
-# 跳过，绝不覆盖用户修改），随后新建会话的预设选择器里出现「Obsidian 模式」。
+# （落点 ~/.dsh/.agent-presets/obsidian/，与手工 cp 完全一致）。已存在时按
+# presetMode 处理：默认 'merge' —— 幂等同步到新版快照，保留用户改动（用户没
+# 动过的文件更新到最新，改过/新增的文件保留，插件新增/移除的文件跟随），彻底
+# 解决「升级插件后 preset 停在旧快照」的问题；保留旧行为可设 'preserve'（绝不
+# 覆盖）。随后新建会话的预设选择器里出现「Obsidian 模式」。
 #
 # 为什么是「安装 preset」而不是直接挂工具：web 面把 agent 平面工具收敛到
 # 预设（每会话挂载），预设根目录由宿主固定为「内置 config/agent-presets +
@@ -16,4 +19,5 @@
       name: 'dsh-tool-obsidian-vault'
       config:
         installPreset: true
+        presetMode: merge
         registerTools: false
