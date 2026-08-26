@@ -1,6 +1,6 @@
 {
   "name": "dsh-tool-obsidian-vault",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "DSH tool plugin for Obsidian vault operations",
   "type": "module",
   "main": "lib/index.js",
