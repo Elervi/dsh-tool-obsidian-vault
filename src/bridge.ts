@@ -13,7 +13,7 @@
  * 桥返回的 VAULT_* / FS_* 错误码直接映射成 VaultError，与文件模式同一词表。
  */
 
-import { readFile } from 'node:fs/promises'
+import { readFile, stat } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { VaultError } from './errors.js'
@@ -23,12 +23,32 @@ export interface BridgeEnv {
   token: string
 }
 
+/**
+ * 校验桥 URL 必须指向本机回环（127.0.0.1 / localhost / ::1）的 http(s)，
+ * 并去掉尾部斜杠。桥令牌只应发给本机 dsh-dock；若标记文件或 env 被本地
+ * 其他进程污染为任意主机，Bearer 令牌会外泄（等同 SSRF），非回环一律拒绝。
+ */
+function loopbackBridgeUrl(url: string): string | null {
+  let u: URL
+  try {
+    u = new URL(url)
+  } catch {
+    return null
+  }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return null
+  const host = u.hostname.replace(/^\[|\]$/g, '').toLowerCase()
+  if (!['127.0.0.1', 'localhost', '::1', '::ffff:127.0.0.1', '0:0:0:0:0:0:0:1'].includes(host)) return null
+  return url.replace(/\/+$/, '')
+}
+
 /** 从环境变量读桥（dsh-dock spawn 时注入） */
 export function bridgeEnv(): BridgeEnv | undefined {
   const url = process.env.DSH_OBSIDIAN_BRIDGE_URL?.trim()
   const token = process.env.DSH_OBSIDIAN_BRIDGE_TOKEN?.trim()
   if (!url || !token) return undefined
-  return { url: url.replace(/\/+$/, ''), token }
+  const safe = loopbackBridgeUrl(url)
+  if (!safe) return undefined
+  return { url: safe, token }
 }
 
 /** dsh-dock 的 current-vault 标记文件（含桥地址的共享通道） */
@@ -47,14 +67,26 @@ interface MarkerFile {
 /** 从标记文件读桥：只有标记文件指向的库 === root 时才采用（shared 多窗口按库匹配） */
 export async function markerBridge(root: string): Promise<BridgeEnv | null> {
   try {
-    const raw = await readFile(bridgeMarkerPath(), 'utf8')
+    const marker = bridgeMarkerPath()
+    // 标记文件含桥令牌：POSIX 下拒绝 group/other 可写、属主非当前用户的文件
+    // （Obsidian 写的是 644，属主即用户，可通过；666/他人所有则拒绝）。
+    const st = await stat(marker)
+    if (process.platform !== 'win32') {
+      const uid = typeof process.getuid === 'function' ? process.getuid() : undefined
+      if ((st.mode & 0o022) !== 0 || (uid !== undefined && st.uid !== uid)) return null
+    }
+    const raw = await readFile(marker, 'utf8')
     const m = JSON.parse(raw) as MarkerFile
-    const norm = (p?: string) => (p ?? '').replace(/[\\/]+$/, '')
-    if (typeof m.bridgeUrl === 'string' && typeof m.bridgeToken === 'string' && norm(m.path) === norm(root)) {
-      return { url: m.bridgeUrl.replace(/\/+$/, ''), token: m.bridgeToken }
+    // 绝对化后再比较：root 可能是相对 cwd 的兜底路径（process.cwd()），
+    // 不做 resolve 时相对/绝对永远不等，标记通道会静默失效。
+    const sameRoot = typeof m.path === 'string' && path.resolve(m.path) === path.resolve(root)
+    if (typeof m.bridgeUrl === 'string' && typeof m.bridgeToken === 'string' && sameRoot) {
+      const safe = loopbackBridgeUrl(m.bridgeUrl)
+      if (!safe) return null
+      return { url: safe, token: m.bridgeToken }
     }
   } catch {
-    // 无标记文件 / 损坏 / 不是目标库 → null（回退）
+    // 无标记文件 / 损坏 / 非回环 / 不是目标库 → null（回退）
   }
   return null
 }

@@ -129,6 +129,20 @@ async function hashTree(dir: string): Promise<Record<string, string>> {
   return map
 }
 
+/**
+ * 校验一条 preset 相对路径是否安全：拒绝空串、绝对路径（Unix 前导 `/`、
+ * Windows 盘符）、`..` 段（含 `\` 分隔变体）。清单文件来自本插件写出的
+ * 基线，但若被本地进程或共享机器上的其他用户污染，未校验的
+ * `join(target, rel)` + `rm(dst)` 会把删除目标解析到 preset 目录之外，
+ * 形成库外任意文件删除原语，因此所有来自清单的 rel 必须先过此关。
+ */
+function isSafeRel(rel: unknown): rel is string {
+  if (typeof rel !== 'string' || rel === '') return false
+  const n = rel.replace(/\\/g, '/')
+  if (n.startsWith('/') || /^[A-Za-z]:\//.test(n)) return false
+  return !n.split('/').includes('..')
+}
+
 async function readManifest(target: string): Promise<Record<string, string>> {
   try {
     const raw = await readFile(join(target, MANIFEST), 'utf8')
@@ -201,8 +215,14 @@ export async function installPreset(options: InstallPresetOptions = {}): Promise
     return { installed: true, target, synced: 'overwritten' }
   }
 
-  // mode === 'merge'：以基线清单做三方合并。
-  const manifest = await readManifest(target)
+  // mode === 'merge'：以基线清单做三方合并。清单不可信——只采纳安全 rel，
+  // 非法项（绝对路径 / `..` / 空）丢弃并记录；同步末尾会把清单重写为当前
+  // 快照（theirs，全部来自 listFiles），污染随之自愈。
+  const manifest: Record<string, string> = {}
+  for (const [rel, hash] of Object.entries(await readManifest(target))) {
+    if (isSafeRel(rel)) manifest[rel] = hash
+    else log(`agent-preset "${id}": 忽略清单中的非法路径 ${JSON.stringify(rel)}（防目录穿越，该路径不参与删除/更新）`)
+  }
   const theirs = await hashTree(source) // 当前快照：相对路径 → 哈希
   const hasBase = Object.keys(manifest).length > 0
   let updated = 0

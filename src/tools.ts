@@ -287,6 +287,28 @@ function inFolder(p: string, folder: string): boolean {
   return p === prefix || p.startsWith(prefix + '/')
 }
 
+/**
+ * Normalize an optional `folder` argument to a vault-relative directory path
+ * (no leading/trailing `/`, no `.`/`..` segments). Empty/undefined → `''`
+ * (whole vault). Shares noteRelPath's rejection of absolute paths, drive
+ * letters and `..`, so a bridge-mode `folder` can never name a location
+ * outside the vault root.
+ */
+function folderRelPath(input: string | undefined): string {
+  if (input === undefined || input.trim() === '') return ''
+  const trimmed = input.trim()
+  if (/^[A-Za-z]:[\\/]/.test(trimmed) || trimmed.startsWith('/') || trimmed.startsWith('\\')) {
+    throw new VaultError(`folder 必须是 vault 相对路径（/ 分隔，不含盘符）：${trimmed}`, VaultCode.PATH_INVALID)
+  }
+  const segments = trimmed
+    .split(process.platform === 'win32' ? /[\\/]+/ : /\/+/)
+    .filter((s) => s !== '' && s !== '.')
+  if (segments.includes('..')) {
+    throw new VaultError(`folder 不能包含 .. 段：${trimmed}`, VaultCode.PATH_INVALID)
+  }
+  return segments.join('/')
+}
+
 /** Walk the vault once and return the notes (optionally all files). */
 async function vaultNotes(
   fs: FileSystem,
@@ -461,14 +483,14 @@ export function registerTools(ctx: Context, config: VaultConfig): void {
       const a = args as { folder?: string; limit?: number; all?: boolean }
       const root = await resolveVaultRoot(config, exec as CwdExec, (args as { vault?: string }).vault)
       const limit = Math.max(1, Math.min(a.limit ?? 100, 1000))
+      const folder = folderRelPath(a.folder)
       // 桥优先：Obsidian getFiles/getMarkdownFiles 视角的准确文件集
       const bridge = await bridgeOrNull(config, root, exec.signal)
       if (bridge) {
-        const res = await bridge.listNotes({ folder: a.folder, all: Boolean(a.all), ignoreDirs: config.ignoreDirs })
+        const res = await bridge.listNotes({ folder, all: Boolean(a.all), ignoreDirs: config.ignoreDirs })
         return { total: res.total, notes: res.notes.slice(0, limit) }
       }
       let notes = await vaultNotes(fs, config, root, exec, Boolean(a.all))
-      const folder = a.folder
       if (folder) {
         notes = notes.filter((n) => inFolder(n.path, folder))
       }
@@ -533,12 +555,13 @@ export function registerTools(ctx: Context, config: VaultConfig): void {
       if (!q) throw new VaultError('query 不能为空', VaultCode.INVALID_ARGS)
       const root = await resolveVaultRoot(config, exec as CwdExec, (args as { vault?: string }).vault)
       const limit = Math.max(1, Math.min(a.limit ?? config.maxResults, 200))
+      const folder = folderRelPath(a.folder)
       // 桥优先：Obsidian 索引视角（cachedRead 走 Obsidian 缓存）
       const bridge = await bridgeOrNull(config, root, exec.signal)
       if (bridge) {
         const res = await bridge.search({
           q,
-          folder: a.folder,
+          folder,
           limit,
           regex: a.regex,
           case_sensitive: a.case_sensitive,
@@ -548,7 +571,6 @@ export function registerTools(ctx: Context, config: VaultConfig): void {
         return { total: res.total, hits: res.hits }
       }
       let notes = await vaultNotes(fs, config, root, exec)
-      const folder = a.folder
       if (folder) {
         notes = notes.filter((n) => inFolder(n.path, folder))
       }
@@ -604,14 +626,14 @@ export function registerTools(ctx: Context, config: VaultConfig): void {
       if (!tag) throw new VaultError('tag 不能为空', VaultCode.INVALID_ARGS)
       const root = await resolveVaultRoot(config, exec as CwdExec, (args as { vault?: string }).vault)
       const limit = Math.max(1, Math.min(a.limit ?? config.maxResults, 200))
+      const folder = folderRelPath(a.folder)
       // 桥优先：metadataCache 的 tags 解析（含 frontmatter tags）
       const bridge = await bridgeOrNull(config, root, exec.signal)
       if (bridge) {
-        const res = await bridge.searchTags({ tag, folder: a.folder, limit, ignoreDirs: config.ignoreDirs })
+        const res = await bridge.searchTags({ tag, folder, limit, ignoreDirs: config.ignoreDirs })
         return { total: res.total, hits: res.hits }
       }
       let notes = await vaultNotes(fs, config, root, exec)
-      const folder = a.folder
       if (folder) {
         notes = notes.filter((n) => inFolder(n.path, folder))
       }
@@ -1478,16 +1500,16 @@ export function registerTools(ctx: Context, config: VaultConfig): void {
     async execute(args, exec) {
       const a = args as { folder?: string; limit?: number }
       const root = await resolveVaultRoot(config, exec as CwdExec, (args as { vault?: string }).vault)
+      const folder = folderRelPath(a.folder)
       // 桥优先：Obsidian 文件树视角（含空文件夹，经 adapter.list）
       const bridge = await bridgeOrNull(config, root, exec.signal)
       if (bridge) {
-        const res = await bridge.listFolders({ folder: a.folder, ignoreDirs: config.ignoreDirs })
+        const res = await bridge.listFolders({ folder, ignoreDirs: config.ignoreDirs })
         const limit = Math.max(1, Math.min(a.limit ?? 100, 1000))
         return { total: res.total, folders: res.folders.slice(0, limit) }
       }
       const rootTarget = await fs.resolve(root, { cwd: root })
       let folders = await listFolders(fs, rootTarget, config.ignoreDirs, exec.signal, !config.allowSymlinkEscape)
-      const folder = a.folder?.trim()
       if (folder) {
         const prefix = folder.replace(/^\/+/, '').replace(/\/+$/, '')
         folders = folders.filter((f) => f.path === prefix || f.path.startsWith(prefix + '/'))
@@ -1798,14 +1820,15 @@ export function registerTools(ctx: Context, config: VaultConfig): void {
       const a = args as { folder?: string; limit?: number }
       const root = await resolveVaultRoot(config, exec as CwdExec, (args as { vault?: string }).vault)
       const limit = Math.max(1, Math.min(a.limit ?? 200, 1000))
+      const folder = folderRelPath(a.folder)
       const bridge = await bridgeOrNull(config, root, exec.signal)
       if (bridge) {
-        const res = await bridge.allTags({ folder: a.folder, ignoreDirs: config.ignoreDirs })
+        const res = await bridge.allTags({ folder, ignoreDirs: config.ignoreDirs })
         return { total: res.total, tags: res.tags.slice(0, limit) }
       }
       // 文件回退：扫描正文提取（与桥结果同构，无计数缓存）
       let notes = await vaultNotes(fs, config, root, exec)
-      if (a.folder) notes = notes.filter((n) => inFolder(n.path, a.folder!))
+      if (folder) notes = notes.filter((n) => inFolder(n.path, folder))
       const counts = new Map<string, number>()
       await mapLimit(notes, 8, async (note) => {
         try {
@@ -1853,9 +1876,12 @@ export function registerTools(ctx: Context, config: VaultConfig): void {
       const a = args as { path: string; source?: string }
       const root = await resolveVaultRoot(config, exec as CwdExec, (args as { vault?: string }).vault)
       const rel = noteRelPath(a.path)
+      // source 与 path 同属笔记相对路径：同样过 noteRelPath 归一化，防止
+      // 桥模式下把未校验路径透传给 dock（dock 侧仍需复校）。
+      const source = a.source !== undefined && a.source.trim() !== '' ? noteRelPath(a.source) : undefined
       const bridge = await bridgeOrNull(config, root, exec.signal)
       if (bridge) {
-        const res = await bridge.noteLink(rel, a.source)
+        const res = await bridge.noteLink(rel, source)
         return { path: rel, link: res.link, format: res.format }
       }
       const link = `[[${rel.replace(/\.md$/, '')}]]`

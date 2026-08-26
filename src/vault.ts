@@ -330,6 +330,12 @@ export async function searchNotes(
   const matchAll = opts?.matchAll ?? false
   let re: RegExp | undefined
   if (regex) {
+    // 用户输入（可能受提示注入影响）直接编译为正则并逐篇执行：长度封顶，
+    // 压低灾难性回溯（ReDoS）把 agent 线程卡死的风险。桥模式下搜索在
+    // dock 侧执行，此守卫覆盖文件直读回退路径。
+    if (q.length > 200) {
+      throw new VaultError(`正则过长（${q.length} 字符，上限 200），请缩短后重试`, VaultCode.REGEX_INVALID)
+    }
     try {
       re = new RegExp(q, caseSensitive ? '' : 'i')
     } catch (err) {
@@ -620,6 +626,9 @@ export async function findBacklinks(
     }
     if (!hit && checkMarkdown) {
       let m: RegExpExecArray | null
+      // MARKDOWN_LINK_RE 是模块级 /g 正则：上个命中点 break 会让 lastIndex
+      // 残留，污染下一次 exec 的起点（漏掉靠前的链接），先复位再扫描。
+      MARKDOWN_LINK_RE.lastIndex = 0
       while ((m = MARKDOWN_LINK_RE.exec(text)) !== null) {
         const resolved = resolveMarkdownTarget(markdownLinkTarget(m), noteDir, resolver)
         if (!resolved) continue
@@ -961,6 +970,8 @@ export interface MarkdownLinkHit {
 export function extractMarkdownLinks(body: string): MarkdownLinkHit[] {
   const links: MarkdownLinkHit[] = []
   let m: RegExpExecArray | null
+  // 复位共享 /g 正则的 lastIndex（可能被带 break 的调用方残留），保证全量扫描。
+  MARKDOWN_LINK_RE.lastIndex = 0
   while ((m = MARKDOWN_LINK_RE.exec(body)) !== null) {
     let target = markdownLinkTarget(m)
     if (target.startsWith('<') && target.endsWith('>')) target = target.slice(1, -1)
@@ -1035,6 +1046,8 @@ export function rewriteMarkdownLinks(
   const newRel = newRelPath.replace(/\.md$/, '')
   const oldKey = oldRelNoExt.toLowerCase()
   let count = 0
+  // replace 对全局正则虽会先复位 lastIndex，这里仍显式复位，防御性对齐。
+  MARKDOWN_LINK_RE.lastIndex = 0
   const text = body.replace(MARKDOWN_LINK_RE, (whole, ...args) => {
     const linkText = args[0] as string
     // 正则的两个备选分支保证其一匹配；空串兜底仅用于满足类型收窄。
@@ -1071,6 +1084,29 @@ export interface FrontmatterUpdateResult {
 }
 
 /**
+ * 把 frontmatter 标量安全序列化：裸值若会被 YAML 误解析（注释截断、非法
+ * 冒号、流式结构歧义、特殊前导字符、首尾空白、空串）则加双引号并转义；
+ * 文档契约的内联数组 `[a, b]` / 映射 `{k: v}` 原样保留。
+ */
+function quoteYaml(value: string): string {
+  return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
+}
+
+function yamlScalar(value: string): string {
+  if (value === '') return '""'
+  const trimmed = value.trim()
+  if (trimmed !== value) return quoteYaml(value) // 首尾空白会改变词法
+  if ((trimmed.startsWith('[') && trimmed.endsWith(']')) || (trimmed.startsWith('{') && trimmed.endsWith('}'))) {
+    return value // 内联数组 / 映射：保持流式结构（文档契约）
+  }
+  if (/^[-?:,[\]{}#&*!|>'"%@`]/.test(trimmed)) return quoteYaml(value) // 特殊前导字符（含注释 / 列表项 / 引号起始）
+  if (/:\s|:\s*$/.test(value)) return quoteYaml(value) // 冒号后空白 / 行尾冒号 → 非法或歧义
+  if (/,\s|\s#/.test(value)) return quoteYaml(value) // 逗号+空格（流式序列歧义）、注释起始
+  if (value.includes('"') || value.includes("'")) return quoteYaml(value) // 裸引号
+  return value
+}
+
+/**
  * Apply a set/delete of top-level frontmatter properties, preserving the rest
  * of the block (key order, comments, unrelated keys) and the body. New keys
  * are appended after the last top-level key, like Obsidian's Properties UI;
@@ -1100,7 +1136,7 @@ export function applyFrontmatterUpdate(
     if (setEntries.length === 0) {
       throw new VaultError('笔记没有 frontmatter，无法删除字段；如需新建请同时传 set', VaultCode.FRONTMATTER_NO_FIELDS)
     }
-    const block = setEntries.map(([k, v]) => `${k}: ${v}`).join('\n')
+    const block = setEntries.map(([k, v]) => `${k}: ${yamlScalar(v)}`).join('\n')
     const fm = `---\n${block}\n---`
     const body = content.replace(/^\uFEFF/, '')
     return { text: body.trim() === '' ? fm : `${fm}\n${body}`, created: true, changes }
@@ -1134,7 +1170,7 @@ export function applyFrontmatterUpdate(
       if (setMap.has(key)) {
         const value = setMap.get(key)!
         setMap.delete(key)
-        out.push(`${key}: ${value}`)
+        out.push(`${key}: ${yamlScalar(value)}`)
         dropping = true
         continue
       }
@@ -1143,7 +1179,7 @@ export function applyFrontmatterUpdate(
     }
     out.push(rawLine)
   }
-  for (const [key, value] of setMap) out.push(`${key}: ${value}`)
+  for (const [key, value] of setMap) out.push(`${key}: ${yamlScalar(value)}`)
   const newBlock = out.join('\n')
   const text = `---\n${newBlock}\n---` + (rest.length > 0 ? `\n${rest.join('\n')}` : '')
   return { text, created: false, changes }
