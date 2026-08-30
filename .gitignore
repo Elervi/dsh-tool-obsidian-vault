@@ -7,3 +7,5 @@ node_modules/
 scripts/probe-bridge.mjs
 scripts/run-vault-tools.mjs
 docs/troubleshooting-broken-symlinks.md
+docs/troubleshooting-dual-package-and-stale-lockfile.md
+prompt-构成与重复审计.md
